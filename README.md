@@ -12,7 +12,7 @@ docker compose up -d
 
 The relay listens on `ws://localhost:7777` by default.
 
-In the LocaPeer app go to **Settings → Relay** and enter `ws://<your-server-ip>:7777`.
+In the LocaPeer app go to **Settings → Relay** and enter `wss://relay.daygle.net`.
 
 ## Configuration
 
@@ -44,14 +44,15 @@ npm run dev
 
 ## Reverse proxy with nginx (HTTPS / WSS)
 
-To expose the relay over `wss://` add a location block to your nginx config:
+To expose the relay over `wss://relay.daygle.net` add a server block to your nginx config:
 
 ```nginx
 server {
     listen 443 ssl;
-    server_name relay.example.com;
+    server_name relay.daygle.net;
 
-    # ... your SSL cert config ...
+    ssl_certificate     /etc/letsencrypt/live/relay.daygle.net/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/relay.daygle.net/privkey.pem;
 
     location / {
         proxy_pass http://127.0.0.1:7777;
@@ -64,7 +65,13 @@ server {
 }
 ```
 
-Then point LocaPeer at `wss://relay.example.com`.
+Obtain a certificate with Certbot:
+
+```bash
+certbot --nginx -d relay.daygle.net
+```
+
+Then point LocaPeer at `wss://relay.daygle.net`.
 
 ## Supported NIPs
 
