@@ -5,6 +5,7 @@ A self-hostable [Nostr](https://nostr.com) relay built for [LocaPeer](https://gi
 ## Quick start with Docker (recommended)
 
 ```bash
+cd /opt
 git clone https://github.com/daygle/locapeer-relay.git
 cd locapeer-relay
 docker compose up -d
@@ -42,9 +43,19 @@ For development with live reload:
 npm run dev
 ```
 
+## Reverse proxy with HAProxy (recommended)
+
+If you are using OPNsense HAProxy for TLS termination, configure your backend to forward to `<server-ip>:7777` with plain `ws://`. HAProxy handles `wss://` on port 443 and passes plain WebSocket traffic through to the relay.
+
+Key HAProxy backend settings for WebSocket:
+- `timeout tunnel 3600s` — keeps long-lived WebSocket connections alive
+- `timeout server 3600s` — matches tunnel timeout
+- `http-reuse safe`
+- HTTP/2 disabled
+
 ## Reverse proxy with nginx (HTTPS / WSS)
 
-To expose the relay over `wss://relay.daygle.net` add a server block to your nginx config:
+Alternatively, add a server block to your nginx config:
 
 ```nginx
 server {
@@ -70,8 +81,6 @@ Obtain a certificate with Certbot:
 ```bash
 certbot --nginx -d relay.daygle.net
 ```
-
-Then point LocaPeer at `wss://relay.daygle.net`.
 
 ## Supported NIPs
 
