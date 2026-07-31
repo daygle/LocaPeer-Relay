@@ -1,4 +1,4 @@
-# locapeer-relay
+# LocaPeer Relay
 
 A self-hostable [Nostr](https://nostr.com) relay built for [LocaPeer](https://github.com/daygle/LocaPeer). Implements [NIP-01](https://github.com/nostr-protocol/nips/blob/master/01.md) and stores events in a local SQLite database.
 
