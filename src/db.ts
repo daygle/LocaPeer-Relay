@@ -61,36 +61,39 @@ export function saveEvent(event: NostrEvent): boolean {
   return storeEvent(event) as boolean;
 }
 
+const MAX_LIMIT = 500;
+
 export function getEvents(filters: Filter[]): NostrEvent[] {
   const results = new Map<string, NostrEvent>();
-  const limit = Math.min(
-    filters.reduce((m, f) => Math.min(m, f.limit ?? 500), 500),
-    500
-  );
 
   for (const filter of filters) {
+    const limit = Math.min(filter.limit ?? MAX_LIMIT, MAX_LIMIT);
     const conditions: string[] = [];
-    const params: (string | number)[] = [];
+    // Params for the JOIN clauses and the WHERE clause are collected
+    // separately because JOINs appear before WHERE in the SQL text, and
+    // positional placeholders are bound in that textual order.
+    const joinParams: (string | number)[] = [];
+    const whereParams: (string | number)[] = [];
 
     if (filter.ids?.length) {
       conditions.push(`id IN (${filter.ids.map(() => '?').join(',')})`);
-      params.push(...filter.ids);
+      whereParams.push(...filter.ids);
     }
     if (filter.authors?.length) {
       conditions.push(`pubkey IN (${filter.authors.map(() => '?').join(',')})`);
-      params.push(...filter.authors);
+      whereParams.push(...filter.authors);
     }
     if (filter.kinds?.length) {
       conditions.push(`kind IN (${filter.kinds.map(() => '?').join(',')})`);
-      params.push(...filter.kinds);
+      whereParams.push(...filter.kinds);
     }
     if (filter.since != null) {
       conditions.push('created_at >= ?');
-      params.push(filter.since);
+      whereParams.push(filter.since);
     }
     if (filter.until != null) {
       conditions.push('created_at <= ?');
-      params.push(filter.until);
+      whereParams.push(filter.until);
     }
 
     const tagFilters = Object.entries(filter).filter(([k]) => k.startsWith('#') && k.length === 2);
@@ -100,14 +103,14 @@ export function getEvents(filters: Filter[]): NostrEvent[] {
       const alias = `t${i}`;
       const values = vals as string[];
       tagJoins.push(
-        `JOIN tags ${alias} ON ${alias}.event_id = e.id AND ${alias}.name = '${tagName}' AND ${alias}.value IN (${values.map(() => '?').join(',')})`
+        `JOIN tags ${alias} ON ${alias}.event_id = e.id AND ${alias}.name = ? AND ${alias}.value IN (${values.map(() => '?').join(',')})`
       );
-      params.push(...values);
+      joinParams.push(tagName, ...values);
     });
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const sql = `SELECT e.* FROM events e ${tagJoins.join(' ')} ${where} ORDER BY e.created_at DESC LIMIT ?`;
-    params.push(limit);
+    const params = [...joinParams, ...whereParams, limit];
 
     const rows = db.prepare(sql).all(...params) as (Omit<NostrEvent, 'tags'> & { tags: string })[];
     for (const row of rows) {
@@ -117,7 +120,9 @@ export function getEvents(filters: Filter[]): NostrEvent[] {
     }
   }
 
-  return [...results.values()].sort((a, b) => b.created_at - a.created_at).slice(0, limit);
+  return [...results.values()]
+    .sort((a, b) => b.created_at - a.created_at)
+    .slice(0, MAX_LIMIT);
 }
 
 export function eventExists(id: string): boolean {
