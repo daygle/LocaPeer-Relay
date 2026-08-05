@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
 import { saveEvent, getEvents, eventExists } from './db';
-import { validateEvent, verifyEventId } from './verify';
+import { validateEvent, verifyEventId, verifySignature } from './verify';
 import { NostrEvent, Filter, Subscription } from './types';
 
 const MAX_SUBS_PER_CLIENT = parseInt(process.env.MAX_SUBS ?? '20');
@@ -23,8 +23,8 @@ function send(ws: WebSocket, msg: unknown[]): void {
 }
 
 function matchesFilter(event: NostrEvent, filter: Filter): boolean {
-  if (filter.ids?.length && !filter.ids.some(id => event.id.startsWith(id))) return false;
-  if (filter.authors?.length && !filter.authors.some(pk => event.pubkey.startsWith(pk))) return false;
+  if (filter.ids?.length && !filter.ids.includes(event.id)) return false;
+  if (filter.authors?.length && !filter.authors.includes(event.pubkey)) return false;
   if (filter.kinds?.length && !filter.kinds.includes(event.kind)) return false;
   if (filter.since != null && event.created_at < filter.since) return false;
   if (filter.until != null && event.created_at > filter.until) return false;
@@ -64,6 +64,11 @@ function handleEvent(client: Client, data: unknown[]): void {
 
   if (!verifyEventId(event)) {
     send(client.ws, ['OK', event.id, false, 'invalid: id does not match']);
+    return;
+  }
+
+  if (!verifySignature(event)) {
+    send(client.ws, ['OK', event.id, false, 'invalid: signature verification failed']);
     return;
   }
 

@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { schnorr } from '@noble/curves/secp256k1';
 import { NostrEvent } from './types';
 
 export function verifyEventId(event: NostrEvent): boolean {
@@ -12,6 +13,14 @@ export function verifyEventId(event: NostrEvent): boolean {
   ]);
   const hash = createHash('sha256').update(serialized).digest('hex');
   return hash === event.id;
+}
+
+export function verifySignature(event: NostrEvent): boolean {
+  try {
+    return schnorr.verify(event.sig, event.id, event.pubkey);
+  } catch {
+    return false;
+  }
 }
 
 export function validateEvent(event: unknown): event is NostrEvent {

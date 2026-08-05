@@ -43,6 +43,41 @@ For development with live reload:
 npm run dev
 ```
 
+## Updating
+
+Your event database persists across updates (it lives in the `relay-data`
+Docker volume, or in the `DB_PATH` file when running without Docker), so
+these steps upgrade the code without losing stored events. The database
+schema is unchanged, so no migration is required.
+
+### With Docker
+
+```bash
+cd /opt/locapeer-relay
+git pull
+docker compose up -d --build
+```
+
+The `--build` flag rebuilds the image so new dependencies and code are
+picked up. To reclaim disk from the old image afterwards:
+
+```bash
+docker image prune -f
+```
+
+### Without Docker
+
+```bash
+cd locapeer-relay
+git pull
+npm install       # pick up any new dependencies
+npm run build
+npm start         # or restart your service (systemd, pm2, etc.)
+```
+
+> **Note:** Signature verification applies only to events received after the
+> update. Events already stored from a previous version are not re-validated.
+
 ## Reverse proxy with HAProxy (recommended)
 
 If you are using OPNsense HAProxy for TLS termination, configure your backend to forward to `<server-ip>:7777` with plain `ws://`. HAProxy handles `wss://` on port 443 and passes plain WebSocket traffic through to the relay.
