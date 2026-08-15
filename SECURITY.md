@@ -69,11 +69,19 @@ authentication, authorization, or encryption at the relay level:
 
 ## Hardening recommendations for operators
 
-- **Terminate TLS at a reverse proxy** (HAProxy or nginx - see the README).
-  The relay speaks plain `ws://`; exposing port 7777 directly means
-  unencrypted traffic and no protection against abusive connections.
+- **Terminate TLS at a reverse proxy** (HAProxy, nginx, or a Cloudflare
+  Tunnel - see the README). The relay speaks plain `ws://`; exposing port
+  7777 directly means unencrypted traffic and no protection against abusive
+  connections.
 - **Restrict network access.** Bind the relay behind your proxy or firewall
   and only allow the proxy to reach port 7777.
+- **Keep the admin panel internal.** The admin HTTP server (`ADMIN_PORT`,
+  default 8080) is meant for LAN access only - never publish it through the
+  tunnel or a public proxy. The admin credentials are created on first run
+  and stored scrypt-hashed in the relay database. The panel is plain HTTP,
+  so restrict it to your trusted LAN. Settings are stored in plaintext in
+  the database, including the Cloudflare tunnel token, so restrict access
+  to the database file and the `tunnel.env` file it writes.
 - **Tune the limits for your expected load** (`MAX_SUBS`, `MAX_FILTERS`,
   `MAX_EVENT_TAGS`, `MAX_EVENT_SIZE`, `MAX_FILTER_ARRAY`,
   `MAX_CONNECTIONS`, `MAX_CONNECTIONS_PER_IP`, `IP_CONNECT_RATE`,

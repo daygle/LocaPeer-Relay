@@ -34,6 +34,64 @@ All settings are environment variables:
 | `IP_CONNECT_BURST` | `10` | Max burst of new connections from a single IP before throttling starts (shared across processes) |
 | `RATE_LIMIT_MESSAGES` | `60` | Max messages per second per connection (token refill rate) |
 | `RATE_LIMIT_BURST` | `100` | Max burst of messages per connection before throttling starts |
+| `WS_PING_INTERVAL_MS` | `30000` | How often the relay sends WebSocket ping frames; clients that do not answer are disconnected. Keeps idle connections alive through intermediaries (e.g. Cloudflare) that drop silent connections |
+| `ADMIN_PORT` | `8080` | Admin panel HTTP port (internal/LAN access only) |
+| `ADMIN_HOST` | `0.0.0.0` | Address the admin panel binds to |
+| `TUNNEL_ENV_PATH` | `<db dir>/tunnel.env` | Where the admin panel writes the Cloudflare tunnel token for the cloudflared container |
+
+> The admin account and every tunable setting above live in the relay
+> database, not in the environment. The environment value only seeds the
+> initial default on first boot; after the first edit in the panel the
+> database wins. The few variables that stay env-only (`PORT`, `DB_PATH`,
+> `ADMIN_PORT`, `ADMIN_HOST`, `TUNNEL_ENV_PATH`) are bootstrap settings the
+> process needs before it can serve anything.
+
+> Most of these variables can be changed at runtime through the admin panel
+> instead of the environment; see the [Admin panel](#admin-panel) section.
+> The environment value seeds the initial default, and the database overrides
+> it once a value is edited in the panel.
+
+## Admin panel
+
+The relay ships with a small admin panel for editing runtime settings and
+watching live stats. It runs on its own HTTP port (`ADMIN_PORT`, default
+8080) and is **intended for internal/LAN access only** - publish it on your
+host and never route it through the Cloudflare tunnel or a public reverse
+proxy. With Docker it is published on the host automatically:
+
+```bash
+docker compose up -d
+# then open http://<your-host-ip>:8080
+```
+
+What you can do:
+
+- **Edit limits** (connections, per-IP caps, rate limits, event/query caps,
+  ping interval) - changes apply immediately, no restart.
+- **Manage the Cloudflare tunnel token** - saving it writes `tunnel.env`
+  next to the database so the cloudflared container picks it up on its next
+  start (`docker compose restart cloudflared`).
+- **Watch live stats** - active/peak connections, per-IP connection counts,
+  events stored, database size, uptime, updated instantly via
+  Server-Sent Events (no polling).
+
+First run: the first time you open the panel it asks you to create the
+admin username and password. The credentials are stored (scrypt-hashed with
+a per-account salt) in the relay database - nothing sensitive lives in
+`.env`. After that, every panel visit requires the login.
+
+Security notes:
+
+- The panel is plain HTTP, so only use it across your trusted LAN and never
+  publish the port through the tunnel or a public proxy.
+- Responses are served with a strict Content-Security-Policy (per-request
+  nonce, no `unsafe-inline`), no-store caching, and anti-framing and
+  referrer-leak headers.
+- Settings and the admin credentials are stored in the `settings` table of
+  the relay database; when multiple relay processes share a database, edits
+  propagate to the others within about a minute.
+- The panel is served by the relay process; if the admin port is already in
+  use, the relay logs a warning and keeps running without the panel.
 
 ## Running without Docker
 
@@ -138,6 +196,53 @@ Obtain a certificate with Certbot:
 ```bash
 certbot --nginx -d relay.daygle.net
 ```
+
+## Cloudflare Tunnel (optional)
+
+Instead of (or in addition to) a reverse proxy, you can expose the relay
+through a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/):
+no port forwarding, no public origin IP, and free TLS at Cloudflare's edge.
+Cloudflare proxies WebSockets on all plans, so `wss://` works out of the box.
+
+1. Move `daygle.net` DNS to Cloudflare (proxied records require Cloudflare
+   to be the authoritative nameserver).
+2. In the Cloudflare dashboard go to **Zero Trust → Networks → Tunnels →
+   Create a tunnel**, choose the **Cloudflared** connector type, and copy the
+   tunnel token.
+3. Add the public hostname `relay.daygle.net` with service type **HTTP** and
+   URL `http://relay:7777` - cloudflared reaches the relay by service name
+   over Docker's internal network; the tunnel and the edge handle `wss://`.
+4. Give cloudflared the token. Two ways:
+
+   - **Preferred:** save it in the [admin panel](#admin-panel) (Settings →
+     Cloudflare Tunnel). The relay writes it to `tunnel.env` in the data
+     volume, then apply it with:
+
+     ```bash
+     docker compose restart cloudflared
+     ```
+
+   - Or put it in `.env` as a first-boot fallback (see `.env.example`):
+
+     ```bash
+     TUNNEL_TOKEN=your-tunnel-token
+     ```
+
+5. Start the stack with the tunnel profile:
+
+   ```bash
+   docker compose --profile tunnel up -d
+   ```
+
+Notes:
+
+- Cloudflare closes WebSocket connections that are idle for roughly 100
+  seconds. The relay now sends ping frames every `WS_PING_INTERVAL_MS`
+  (default 30s) to keep connections alive through the tunnel.
+- If the tunnel is your only public entry point, remove the `ports:` mapping
+  from the `relay` service so port 7777 is not exposed on your LAN, and you
+  can remove the relay backend from HAProxy.
+- Clients connect exactly as before: `wss://relay.daygle.net`.
 
 ## Supported NIPs
 

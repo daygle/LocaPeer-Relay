@@ -1,4 +1,5 @@
 import { createRelay } from './relay';
+import { startAdminServer } from './admin';
 
 const PORT = parseInt(process.env.PORT ?? '7777', 10);
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
@@ -11,6 +12,8 @@ const wss = createRelay(PORT);
 wss.on('listening', () => {
   console.log(`locapeer-relay listening on ws://0.0.0.0:${PORT}`);
 });
+
+startAdminServer();
 
 function shutdown(signal: string): void {
   console.log(`${signal} received, shutting down...`);

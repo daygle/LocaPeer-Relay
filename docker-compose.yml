@@ -3,6 +3,9 @@ services:
     build: .
     ports:
       - "${PORT:-7777}:7777"
+      # Admin panel - internal/LAN only. Do NOT route this port through the
+      # tunnel or a public reverse proxy.
+      - "${ADMIN_PORT:-8080}:8080"
     volumes:
       - relay-data:/data
     environment:
@@ -17,6 +20,24 @@ services:
       - IP_CONNECT_BURST=10
       - RATE_LIMIT_MESSAGES=60
       - RATE_LIMIT_BURST=100
+    restart: unless-stopped
+
+  # Optional: expose the relay through a Cloudflare Tunnel so clients reach
+  # wss://relay.daygle.net without port forwarding or exposing your origin IP.
+  # Enable with:  docker compose --profile tunnel up -d
+  # The tunnel token comes from tunnel.env (written by the relay's admin panel
+  # into the shared data volume) or, before that, from TUNNEL_TOKEN in .env.
+  # The public hostname is configured in the Cloudflare Zero Trust dashboard
+  # with service type HTTP -> http://relay:7777 (cloudflared reaches the relay
+  # by service name over Docker's internal network).
+  cloudflared:
+    build: ./cloudflared
+    profiles: ["tunnel"]
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    volumes:
+      - relay-data:/data:ro
     restart: unless-stopped
 
 volumes:

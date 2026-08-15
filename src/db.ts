@@ -4,7 +4,7 @@ import path from 'path';
 import { NostrEvent, Filter } from './types';
 import { isTagFilterKey } from './filter';
 
-const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), 'relay.db');
+export const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), 'relay.db');
 
 // Ensure the database directory exists before better-sqlite3 tries to open the file.
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
@@ -52,6 +52,11 @@ db.exec(`
     ip TEXT PRIMARY KEY,
     tokens REAL NOT NULL,
     last_refill INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
   );
 `);
 
@@ -278,4 +283,46 @@ export function tryAcquireIpRate(ip: string, rate: number, burst: number): boole
 // have refilled to full anyway; keeps the table bounded.
 export function pruneIpState(olderThan: number): void {
   ipStatePrune.run(olderThan);
+}
+
+// ---------------------------------------------------------------------------
+// Admin settings
+//
+// Key/value settings editable through the admin panel. The relay seeds each
+// key from its environment variable (for backwards compatibility), then the
+// database overrides it once a value is changed through the admin API.
+// ---------------------------------------------------------------------------
+
+const settingGet = db.prepare('SELECT value FROM settings WHERE key = ?');
+const settingSet = db.prepare(`
+  INSERT INTO settings (key, value) VALUES (?, ?)
+  ON CONFLICT(key) DO UPDATE SET value = excluded.value
+`);
+const settingAll = db.prepare('SELECT key, value FROM settings');
+const eventCount = db.prepare('SELECT COUNT(*) AS n FROM events');
+
+export function getSettingValue(key: string): string | undefined {
+  const row = settingGet.get(key) as { value: string } | undefined;
+  return row?.value;
+}
+
+export function setSettingValue(key: string, value: string): void {
+  settingSet.run(key, value);
+}
+
+export function getSettingsRows(): Array<[string, string]> {
+  return (settingAll.all() as Array<{ key: string; value: string }>).map((r) => [r.key, r.value]);
+}
+
+// Stats helpers for the admin panel.
+export function countEvents(): number {
+  return (eventCount.get() as { n: number }).n;
+}
+
+export function getDbSizeBytes(): number {
+  try {
+    return fs.statSync(DB_PATH).size;
+  } catch {
+    return 0;
+  }
 }

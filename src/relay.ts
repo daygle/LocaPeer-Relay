@@ -1,3 +1,4 @@
+import { EventEmitter } from 'events';
 import { WebSocketServer, WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
 import { randomBytes } from 'crypto';
@@ -5,26 +6,10 @@ import { saveEvent, getEvents, eventExists, acquireConnectionLease, renewConnect
 import { validateEvent, verifyEventId, verifySignature, serializeEvent } from './verify';
 import { isTagFilterKey } from './filter';
 import { NostrEvent, Filter, Subscription } from './types';
+import { settings } from './settings';
 
-// Parse a positive integer env var, falling back to a default on missing or
-// invalid values so a bad config can never silently disable a limit.
-function parsePositiveInt(name: string, fallback: number): number {
-  const value = parseInt(process.env[name] ?? '', 10);
-  return Number.isInteger(value) && value > 0 ? value : fallback;
-}
-
-const MAX_SUBS_PER_CLIENT = parsePositiveInt('MAX_SUBS', 20);
-const MAX_FILTERS_PER_SUB = parsePositiveInt('MAX_FILTERS', 10);
-const MAX_EVENT_TAGS = parsePositiveInt('MAX_EVENT_TAGS', 2500);
-const MAX_FILTER_ARRAY = parsePositiveInt('MAX_FILTER_ARRAY', 100);
-const MAX_EVENT_SIZE = parsePositiveInt('MAX_EVENT_SIZE', 65536);
-const MAX_CONNECTIONS = parsePositiveInt('MAX_CONNECTIONS', 100);
-const RATE_LIMIT_RATE = parsePositiveInt('RATE_LIMIT_MESSAGES', 60);
-const RATE_LIMIT_BURST = parsePositiveInt('RATE_LIMIT_BURST', 100);
+// Maximum consecutive rate-limit violations before a connection is closed.
 const RATE_LIMIT_MAX_VIOLATIONS = 10;
-const MAX_CONNECTIONS_PER_IP = parsePositiveInt('MAX_CONNECTIONS_PER_IP', 10);
-const IP_CONNECT_RATE = parsePositiveInt('IP_CONNECT_RATE', 5);
-const IP_CONNECT_BURST = parsePositiveInt('IP_CONNECT_BURST', 10);
 
 // Connection leases: a row per accepted connection with an expiry, renewed
 // periodically. Expired rows (crashed processes) are purged on the next
@@ -43,11 +28,19 @@ interface Client {
   tokens: number;
   lastRefill: number;
   violations: number;
+  // False between a ping and the client's pong; the keepalive loop terminates
+  // clients that fail to answer.
+  alive: boolean;
 }
 
 const clients = new Set<Client>();
 const clientLeases = new Map<Client, string>();
 let lastIpStatePrune = 0;
+let maxConnectionsSeen = 0;
+
+// Emitted whenever live stats change (connection open/close, event stored)
+// so the admin panel can push instant updates over Server-Sent Events.
+export const relayEvents = new EventEmitter();
 
 function send(ws: WebSocket, msg: unknown[]): void {
   if (ws.readyState === WebSocket.OPEN) {
@@ -92,18 +85,19 @@ function isInt(v: unknown): v is number {
 function validateFilter(f: unknown): f is Filter {
   if (typeof f !== 'object' || f === null || Array.isArray(f)) return false;
   const o = f as Record<string, unknown>;
+  const maxArray = settings.getInt('MAX_FILTER_ARRAY');
   for (const [key, value] of Object.entries(o)) {
     if (key === 'ids' || key === 'authors') {
-      if (!isStringArray(value, MAX_FILTER_ARRAY)) return false;
+      if (!isStringArray(value, maxArray)) return false;
     } else if (key === 'kinds') {
-      if (!Array.isArray(value) || value.length > MAX_FILTER_ARRAY || !value.every(v => isInt(v))) return false;
+      if (!Array.isArray(value) || value.length > maxArray || !value.every(v => isInt(v))) return false;
     } else if (key === 'since' || key === 'until') {
       if (!isInt(value)) return false;
     } else if (key === 'limit') {
       if (!isInt(value) || value <= 0) return false;
     } else if (isTagFilterKey(key)) {
       // NIP-01 tag filters
-      if (!isStringArray(value, MAX_FILTER_ARRAY)) return false;
+      if (!isStringArray(value, maxArray)) return false;
     }
     // Unknown fields are allowed and ignored, per NIP-01.
   }
@@ -132,12 +126,12 @@ function handleEvent(client: Client, data: unknown[]): void {
   // Cheap checks first: the serialized form is needed for both the size cap
   // and the id hash, so compute it once here.
   const serialized = serializeEvent(event);
-  if (serialized.length > MAX_EVENT_SIZE) {
+  if (serialized.length > settings.getInt('MAX_EVENT_SIZE')) {
     send(client.ws, ['OK', event.id, false, 'invalid: event too large']);
     return;
   }
 
-  if (event.tags.length > MAX_EVENT_TAGS) {
+  if (event.tags.length > settings.getInt('MAX_EVENT_TAGS')) {
     send(client.ws, ['OK', event.id, false, 'invalid: too many tags']);
     return;
   }
@@ -163,6 +157,7 @@ function handleEvent(client: Client, data: unknown[]): void {
 
   if (saved) {
     broadcastEvent(event);
+    relayEvents.emit('stats');
   }
 }
 
@@ -173,14 +168,16 @@ function handleReq(client: Client, data: unknown[]): void {
     return;
   }
 
-  if (client.subs.size >= MAX_SUBS_PER_CLIENT && !client.subs.has(subId)) {
-    send(client.ws, ['NOTICE', `error: max ${MAX_SUBS_PER_CLIENT} subscriptions per connection`]);
+  const maxSubs = settings.getInt('MAX_SUBS');
+  if (client.subs.size >= maxSubs && !client.subs.has(subId)) {
+    send(client.ws, ['NOTICE', `error: max ${maxSubs} subscriptions per connection`]);
     return;
   }
 
   const rawFilters = data.slice(2);
-  if (!rawFilters.length || rawFilters.length > MAX_FILTERS_PER_SUB) {
-    send(client.ws, ['NOTICE', 'invalid: expected 1 to ' + MAX_FILTERS_PER_SUB + ' filters']);
+  const maxFilters = settings.getInt('MAX_FILTERS');
+  if (!rawFilters.length || rawFilters.length > maxFilters) {
+    send(client.ws, ['NOTICE', 'invalid: expected 1 to ' + maxFilters + ' filters']);
     return;
   }
 
@@ -215,8 +212,8 @@ function handleClose(client: Client, data: unknown[]): void {
 function enforceRateLimit(client: Client): boolean {
   const now = Date.now();
   client.tokens = Math.min(
-    RATE_LIMIT_BURST,
-    client.tokens + ((now - client.lastRefill) / 1000) * RATE_LIMIT_RATE
+    settings.getInt('RATE_LIMIT_BURST'),
+    client.tokens + ((now - client.lastRefill) / 1000) * settings.getInt('RATE_LIMIT_MESSAGES')
   );
   client.lastRefill = now;
 
@@ -270,6 +267,7 @@ function handleMessage(client: Client, raw: string): void {
 
 function cleanupClient(client: Client, token: string): void {
   clients.delete(client);
+  relayEvents.emit('stats');
   clientLeases.delete(client);
   try {
     releaseConnectionLease(token);
@@ -281,10 +279,12 @@ function cleanupClient(client: Client, token: string): void {
 export function createRelay(port: number): WebSocketServer {
   const wss = new WebSocketServer({ port, maxPayload: 1024 * 1024 });
 
-  // Keep leases for this process's connections alive and prune idle per-IP
-  // rate state. unref() so the timer never keeps the process alive by itself.
+  // Keep leases for this process's connections alive, prune idle per-IP rate
+  // state, and pick up settings changes made in another process. unref() so
+  // the timer never keeps the process alive by itself.
   const heartbeat = setInterval(() => {
     const now = Date.now();
+    settings.reloadIfStale();
     if (now - lastIpStatePrune >= IP_STATE_PRUNE_INTERVAL_MS) {
       lastIpStatePrune = now;
       try {
@@ -305,11 +305,44 @@ export function createRelay(port: number): WebSocketServer {
   }, CONN_LEASE_HEARTBEAT_MS);
   heartbeat.unref();
 
+  // WebSocket-level keepalive: ping every client, and terminate any that did
+  // not answer the previous ping (gone or wedged). terminate() fires the
+  // 'close' handler, which releases the connection lease and cleans up. The
+  // interval is re-read from settings on every round, so admin panel changes
+  // apply without a restart.
+  function pingRound(): void {
+    for (const client of clients) {
+      if (client.ws.readyState !== WebSocket.OPEN) continue;
+      if (!client.alive) {
+        try {
+          client.ws.terminate();
+        } catch (err) {
+          console.error('[!] keepalive terminate error:', err);
+        }
+        continue;
+      }
+      client.alive = false;
+      try {
+        client.ws.ping();
+      } catch (err) {
+        console.error('[!] keepalive ping error:', err);
+      }
+    }
+  }
+  function scheduleNextPing(): void {
+    const timer = setTimeout(() => {
+      pingRound();
+      scheduleNextPing();
+    }, settings.getInt('WS_PING_INTERVAL_MS'));
+    timer.unref();
+  }
+  scheduleNextPing();
+
   wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
     const ip = req.socket.remoteAddress ?? 'unknown';
 
     // Fast local pre-filter before any DB work.
-    if (clients.size >= MAX_CONNECTIONS) {
+    if (clients.size >= settings.getInt('MAX_CONNECTIONS')) {
       send(ws, ['NOTICE', 'error: server at max connections, try again later']);
       ws.close();
       return;
@@ -318,7 +351,7 @@ export function createRelay(port: number): WebSocketServer {
     // Cross-process per-IP rate bucket for connection attempts.
     let rateOk = false;
     try {
-      rateOk = tryAcquireIpRate(ip, IP_CONNECT_RATE, IP_CONNECT_BURST);
+      rateOk = tryAcquireIpRate(ip, settings.getInt('IP_CONNECT_RATE'), settings.getInt('IP_CONNECT_BURST'));
     } catch (err) {
       console.error('[!] ip rate error:', err);
     }
@@ -337,8 +370,8 @@ export function createRelay(port: number): WebSocketServer {
         pid: process.pid,
         ip,
         ttlMs: CONN_LEASE_TTL_MS,
-        maxConnections: MAX_CONNECTIONS,
-        maxConnectionsPerIp: MAX_CONNECTIONS_PER_IP,
+        maxConnections: settings.getInt('MAX_CONNECTIONS'),
+        maxConnectionsPerIp: settings.getInt('MAX_CONNECTIONS_PER_IP'),
       });
     } catch (err) {
       console.error('[!] lease acquire error:', err);
@@ -356,16 +389,25 @@ export function createRelay(port: number): WebSocketServer {
       ws,
       subs: new Map(),
       ip,
-      tokens: RATE_LIMIT_BURST,
+      tokens: settings.getInt('RATE_LIMIT_BURST'),
       lastRefill: Date.now(),
       violations: 0,
+      alive: true,
     };
     clients.add(client);
+    if (clients.size > maxConnectionsSeen) {
+      maxConnectionsSeen = clients.size;
+    }
     clientLeases.set(client, leaseToken);
+    relayEvents.emit('stats');
     console.log(`[+] ${ip} connected (total: ${clients.size})`);
 
     ws.on('message', (buf) => {
       handleMessage(client, buf.toString());
+    });
+
+    ws.on('pong', () => {
+      client.alive = true;
     });
 
     ws.on('close', () => {
@@ -382,4 +424,21 @@ export function createRelay(port: number): WebSocketServer {
   });
 
   return wss;
+}
+
+// Live stats for the admin panel.
+export function getActiveConnections(): number {
+  return clients.size;
+}
+
+export function getMaxConnectionsSeen(): number {
+  return maxConnectionsSeen;
+}
+
+export function getConnectionsPerIp(): Record<string, number> {
+  const byIp: Record<string, number> = {};
+  for (const client of clients) {
+    byIp[client.ip] = (byIp[client.ip] ?? 0) + 1;
+  }
+  return byIp;
 }

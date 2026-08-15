@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LocaPeer Relay Admin</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style nonce="__CSP_NONCE__">
+  :root {
+    color-scheme: dark;
+    --bg: #0a0c11;
+    --panel: #12161f;
+    --panel-2: #0d1017;
+    --border: #212838;
+    --border-strong: #2b3447;
+    --text: #e9ecf4;
+    --muted: #8790a5;
+    --accent: #5b7cfa;
+    --accent-2: #7bd88f;
+    --danger: #e0546b;
+    --radius: 10px;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background: var(--bg);
+    background-image: radial-gradient(1100px 480px at 50% -12%, rgba(91, 124, 250, 0.09), transparent 60%);
+    color: var(--text);
+    margin: 0;
+    padding: 28px 24px 44px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: rgba(91, 124, 250, 0.35); }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 22px; }
+  h1 {
+    font-size: 21px;
+    font-weight: 700;
+    margin: 0;
+    letter-spacing: -0.02em;
+    background: linear-gradient(90deg, #ffffff, #9fb0ff);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+  }
+  .ver { color: var(--muted); font-size: 12px; font-family: var(--mono); }
+  .spacer { flex: 1; }
+  .banner {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 11px 16px;
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 22px;
+    line-height: 1.6;
+  }
+  .banner code { background: var(--panel-2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; font-family: var(--mono); font-size: 11px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    transition: border-color .15s ease;
+  }
+  .card:hover { border-color: var(--border-strong); }
+  .card .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
+  .card .v { font-size: 26px; font-weight: 650; margin-top: 6px; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+  section {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px 20px;
+    margin-bottom: 16px;
+  }
+  section h2 { font-size: 14px; font-weight: 600; margin: 0 0 16px; color: var(--text); letter-spacing: .01em; display: flex; align-items: center; gap: 10px; }
+  .chip {
+    background: rgba(123, 216, 143, 0.12);
+    color: var(--accent-2);
+    font-size: 12px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    border-radius: 999px;
+    padding: 2px 10px;
+    font-family: var(--mono);
+  }
+  #history { display: block; width: 100%; height: 120px; }
+  .field { margin-bottom: 15px; }
+  .field:last-child { margin-bottom: 0; }
+  .field label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 5px; color: var(--text); }
+  .field .help { font-size: 12px; color: var(--muted); margin: 5px 0 0; line-height: 1.55; }
+  .field .help code { background: var(--panel-2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; font-family: var(--mono); font-size: 11px; }
+  input[type=number], input[type=password], input[type=text] {
+    width: 100%;
+    background: var(--panel-2);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    color: var(--text);
+    padding: 9px 12px;
+    font-size: 14px;
+    transition: border-color .15s ease, box-shadow .15s ease;
+  }
+  input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(91, 124, 250, 0.18); }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row input { flex: 1; }
+  .actions { display: flex; gap: 12px; align-items: center; margin-top: 10px; }
+  button {
+    background: var(--accent);
+    color: #fff;
+    border: 0;
+    border-radius: 8px;
+    padding: 9px 18px;
+    font-size: 14px;
+    font-weight: 550;
+    cursor: pointer;
+    transition: background .15s ease, transform .05s ease;
+  }
+  button:hover { background: #6d8bfb; }
+  button:active { transform: translateY(1px); }
+  button.secondary { background: var(--border-strong); color: var(--text); }
+  button.secondary:hover { background: #37415a; }
+  button.link { background: none; color: var(--muted); padding: 6px 10px; font-weight: 500; }
+  button.link:hover { color: var(--text); background: none; }
+  .toast { font-size: 13px; padding: 8px 12px; border-radius: 8px; }
+  .toast.ok { background: rgba(123, 216, 143, 0.12); color: var(--accent-2); }
+  .toast.err { background: rgba(224, 84, 107, 0.14); color: var(--danger); }
+  .err-field { border-color: var(--danger) !important; }
+  .auth-card {
+    max-width: 420px;
+    margin: 10vh auto 0;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 30px 32px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  }
+  .auth-card h2 { margin: 0 0 6px; font-size: 19px; letter-spacing: -0.01em; }
+  .auth-card p { color: var(--muted); font-size: 13px; margin: 0 0 20px; line-height: 1.6; }
+  .auth-card .err { color: var(--danger); font-size: 13px; margin: 12px 0 0; min-height: 18px; }
+  .hidden { display: none; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 26px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>LocaPeer Relay</h1>
+    <span class="ver" id="version"></span>
+    <span class="spacer"></span>
+    <button class="link hidden" id="logout">log out</button>
+  </header>
+
+  <div id="auth-view"></div>
+
+  <div id="panel-view" class="hidden">
+    <div class="banner">
+      Admin panel - internal access only. Do not expose this port publicly (do not add it to the
+      Cloudflare tunnel or a public reverse proxy). Settings apply immediately, except the tunnel
+      token, which takes effect after a <code>docker compose restart cloudflared</code>.
+    </div>
+    <div class="stats" id="stats"></div>
+    <section>
+      <h2>Connections Over Time <span class="chip" id="history-current"></span></h2>
+      <canvas id="history"></canvas>
+    </section>
+    <div id="settings"></div>
+    <div class="actions">
+      <button id="save">Save settings</button>
+      <span id="toast" class="toast"></span>
+    </div>
+    <footer>Settings are stored in the relay database and override environment defaults. The admin account is created on first login and also lives in the database.</footer>
+  </div>
+</div>
+<script nonce="__CSP_NONCE__">
+const $ = (id) => document.getElementById(id);
+const STORAGE_KEY = 'relayAdminAuth';
+let defs = [];
+let creds = null; // base64 "user:pass", kept in memory + sessionStorage
+let statsStartedAt = null; // epoch ms from the server, drives the uptime card
+let statsAbort = null; // AbortController for the stats stream
+
+function storedCreds() { return sessionStorage.getItem(STORAGE_KEY); }
+function authHeader() {
+  const token = creds || storedCreds();
+  return token ? { Authorization: 'Basic ' + token } : {};
+}
+function setCreds(username, password) {
+  creds = btoa(unescape(encodeURIComponent(username + ':' + password)));
+  sessionStorage.setItem(STORAGE_KEY, creds);
+}
+function clearCreds() {
+  creds = null;
+  sessionStorage.removeItem(STORAGE_KEY);
+}
+
+class AuthError extends Error {}
+
+async function api(path, opts = {}) {
+  const headers = Object.assign({}, authHeader(), opts.headers || {});
+  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  const body = await res.json().catch(() => ({}));
+  if (res.status === 401) {
+    clearCreds();
+    throw new AuthError(body.error || 'unauthorized');
+  }
+  if (!res.ok) {
+    const detail = body.errors ? JSON.stringify(body.errors) : (body.error || res.statusText);
+    throw new Error(detail);
+  }
+  return body;
+}
+
+function esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+
+// ---------------------------------------------------------------- auth views
+function showAuth(title, blurb, fieldsHtml, submitLabel, onsubmit) {
+  const view = $('auth-view');
+  view.innerHTML = `
+    <div class="auth-card">
+      <h2>${esc(title)}</h2>
+      <p>${esc(blurb)}</p>
+      ${fieldsHtml}
+      <div class="actions"><button id="auth-submit">${esc(submitLabel)}</button></div>
+      <p class="err" id="auth-err"></p>
+    </div>`;
+  $('auth-submit').addEventListener('click', () => {
+    $('auth-err').textContent = '';
+    onsubmit();
+  });
+  for (const input of view.querySelectorAll('input')) {
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') $('auth-submit').click(); });
+  }
+  $('panel-view').classList.add('hidden');
+  view.classList.remove('hidden');
+}
+
+function showSetup() {
+  showAuth('Create Admin Account',
+    'This is the first run of the admin panel. Choose a username and a strong password. The credentials are stored (hashed) in the relay database, not in any environment file.',
+    `<div class="field"><label for="su-user">Username</label><input id="su-user" type="text" autocomplete="username"></div>
+     <div class="field"><label for="su-pass">Password</label><input id="su-pass" type="password" autocomplete="new-password"></div>
+     <div class="field"><label for="su-pass2">Confirm password</label><input id="su-pass2" type="password" autocomplete="new-password"></div>`,
+    'Create account',
+    async () => {
+      const username = $('su-user').value.trim();
+      const password = $('su-pass').value;
+      const confirm = $('su-pass2').value;
+      if (password !== confirm) { $('auth-err').textContent = 'Passwords do not match.'; return; }
+      try {
+        const res = await fetch('/api/setup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const first = (body.errors && body.errors[0] && body.errors[0].message) || body.error || res.statusText;
+          $('auth-err').textContent = first;
+          return;
+        }
+        setCreds(username, password);
+        enterPanel();
+      } catch (e) {
+        $('auth-err').textContent = 'Setup failed: ' + e.message;
+      }
+    });
+}
+
+function showLogin(message) {
+  showAuth('Admin Login',
+    'Enter the admin credentials created on first setup.',
+    `<div class="field"><label for="li-user">Username</label><input id="li-user" type="text" autocomplete="username"></div>
+     <div class="field"><label for="li-pass">Password</label><input id="li-pass" type="password" autocomplete="current-password"></div>`,
+    'Log in',
+    async () => {
+      setCreds($('li-user').value.trim(), $('li-pass').value);
+      try {
+        await api('/api/stats');
+        enterPanel();
+      } catch (e) {
+        if (e instanceof AuthError) $('auth-err').textContent = 'Invalid username or password.';
+        else $('auth-err').textContent = 'Login failed: ' + e.message;
+      }
+    });
+  if (message) $('auth-err').textContent = message;
+}
+
+// --------------------------------------------------------------- panel views
+function fmtBytes(n) {
+  if (n < 1024) return n + ' B';
+  const units = ['KB', 'MB', 'GB'];
+  let i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < units.length - 1);
+  return n.toFixed(1) + ' ' + units[i];
+}
+
+function fmtUptime(s) {
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  if (d > 0) return d + 'd ' + h + 'h';
+  if (h > 0) return h + 'h ' + m + 'm';
+  return m + 'm ' + (s % 60) + 's';
+}
+
+function renderStats(s) {
+  statsStartedAt = s.startedAt || null;
+  $('version').textContent = 'v' + esc(s.version);
+  $('stats').innerHTML = [
+    ['Active connections', s.connections],
+    ['Peak connections', s.maxConnectionsSeen],
+    ['Events stored', s.events],
+    ['Database size', fmtBytes(s.dbSizeBytes)],
+    ['Uptime', fmtUptime(s.uptimeSeconds)],
+  ].map(([k, v], i) =>
+    '<div class="card"><div class="k">' + k + '</div><div class="v"' + (i === 4 ? ' id="stat-uptime"' : '') + '>' + esc(v) + '</div></div>'
+  ).join('');
+  pushSample(s.connections);
+}
+
+// ------------------------------------------------- connection history sparkline
+const HISTORY_WINDOW_MS = 10 * 60 * 1000;
+const HISTORY = [];
+let lastSampleAt = 0;
+
+function pushSample(connections, t) {
+  t = t || Date.now();
+  const last = HISTORY.length ? HISTORY[HISTORY.length - 1] : null;
+  // Skip only duplicate values within a short window (an SSE push + the 1s
+  // ticker firing together); never drop an actual change.
+  if (last && last.connections === connections && t - last.t < 300) return;
+  lastSampleAt = t;
+  HISTORY.push({ t, connections });
+  while (HISTORY.length && t - HISTORY[0].t > HISTORY_WINDOW_MS) HISTORY.shift();
+  if (HISTORY.length > 720) HISTORY.splice(0, HISTORY.length - 720);
+  drawHistory();
+}
+
+function niceCeil(n) {
+  if (n <= 1) return 1;
+  if (n <= 2) return 2;
+  if (n <= 5) return 5;
+  if (n <= 10) return 10;
+  const pow = Math.pow(10, Math.floor(Math.log10(n)));
+  const m = n / pow;
+  return (m <= 2 ? 2 : m <= 5 ? 5 : 10) * pow;
+}
+
+function drawHistory() {
+  const canvas = $('history');
+  if (!canvas) return;
+  const cssWidth = canvas.clientWidth || 600;
+  const cssHeight = 120;
+  const dpr = window.devicePixelRatio || 1;
+  const pxW = Math.round(cssWidth * dpr);
+  const pxH = Math.round(cssHeight * dpr);
+  if (canvas.width !== pxW || canvas.height !== pxH) {
+    canvas.width = pxW;
+    canvas.height = pxH;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssWidth, cssHeight);
+
+  const chip = $('history-current');
+  const last = HISTORY.length ? HISTORY[HISTORY.length - 1].connections : 0;
+  if (chip) chip.textContent = last + ' active';
+
+  const padL = 8, padR = 8, padT = 10, padB = 20;
+  const w = cssWidth - padL - padR;
+  const h = cssHeight - padT - padB;
+  if (w <= 0 || h <= 0) return;
+
+  const FONT = 'system-ui, -apple-system, sans-serif';
+
+  if (HISTORY.length < 2) {
+    ctx.fillStyle = '#8790a5';
+    ctx.font = '12px ' + FONT;
+    ctx.textAlign = 'center';
+    ctx.fillText('Waiting for data…', cssWidth / 2, cssHeight / 2 - 4);
+    return;
+  }
+
+  const now = HISTORY[HISTORY.length - 1].t;
+  const t0 = now - HISTORY_WINDOW_MS;
+  const yMax = niceCeil(Math.max(1, ...HISTORY.map((s) => s.connections)));
+  const x = (t) => padL + ((t - t0) / HISTORY_WINDOW_MS) * w;
+  const y = (v) => padT + h * (1 - v / yMax);
+
+  // horizontal grid lines
+  ctx.strokeStyle = 'rgba(135,144,165,0.14)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 3; i++) {
+    const gy = padT + h * (i / 3);
+    ctx.beginPath();
+    ctx.moveTo(padL, gy);
+    ctx.lineTo(padL + w, gy);
+    ctx.stroke();
+  }
+
+  // area fill under the line
+  const grad = ctx.createLinearGradient(0, padT, 0, padT + h);
+  grad.addColorStop(0, 'rgba(91,124,250,0.28)');
+  grad.addColorStop(1, 'rgba(91,124,250,0)');
+  ctx.beginPath();
+  ctx.moveTo(x(t0), padT + h);
+  for (const s of HISTORY) ctx.lineTo(x(s.t), y(s.connections));
+  ctx.lineTo(x(now), padT + h);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // the line itself
+  ctx.beginPath();
+  for (let i = 0; i < HISTORY.length; i++) {
+    const s = HISTORY[i];
+    if (i === 0) ctx.moveTo(x(s.t), y(s.connections));
+    else ctx.lineTo(x(s.t), y(s.connections));
+  }
+  ctx.strokeStyle = '#5b7cfa';
+  ctx.lineWidth = 1.6;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  // current point
+  ctx.beginPath();
+  ctx.arc(x(last.t), y(last.connections), 2.6, 0, Math.PI * 2);
+  ctx.fillStyle = '#7bd88f';
+  ctx.fill();
+
+  // time axis labels
+  ctx.fillStyle = '#8790a5';
+  ctx.font = '11px ' + FONT;
+  ctx.textAlign = 'left';
+  ctx.fillText(Math.round(HISTORY_WINDOW_MS / 60000) + 'm window', padL, cssHeight - 6);
+  ctx.textAlign = 'right';
+  ctx.fillText('now', padL + w, cssHeight - 6);
+}
+
+window.addEventListener('resize', drawHistory);
+
+// Parse one SSE frame: lines up to a blank line, 'event:' + 'data:' fields.
+function handleSseFrame(frame) {
+  let event = 'message';
+  const dataLines = [];
+  for (const line of frame.split('\n')) {
+    if (line.startsWith('event:')) event = line.slice(6).trim();
+    else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+    else if (line.startsWith(':')) continue; // comment / keepalive
+  }
+  if (event !== 'stats' || dataLines.length === 0) return;
+  try {
+    renderStats(JSON.parse(dataLines.join('\n')));
+  } catch (e) { /* ignore malformed frames */ }
+}
+
+// Live stats via Server-Sent Events. fetch() (not EventSource) so the auth
+// header can be sent; reconnects automatically on transient failures.
+async function startStatsStream() {
+  stopStatsStream();
+  const ac = new AbortController();
+  statsAbort = ac;
+  while (!ac.signal.aborted) {
+    try {
+      const res = await fetch('/api/stats/stream', { headers: authHeader(), signal: ac.signal });
+      if (ac.signal.aborted) return;
+      if (res.status === 401) {
+        clearCreds();
+        showLogin('Session expired - log in again.');
+        return;
+      }
+      if (!res.ok || !res.body) throw new Error('stats stream failed (' + res.status + ')');
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (ac.signal.aborted) return;
+        buffer += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buffer.indexOf('\n\n')) !== -1) {
+          handleSseFrame(buffer.slice(0, idx));
+          buffer = buffer.slice(idx + 2);
+        }
+      }
+    } catch (e) {
+      if (ac.signal.aborted) return; // intentional stop
+    }
+    if (!ac.signal.aborted) await new Promise((r) => setTimeout(r, 2000)); // reconnect
+  }
+}
+
+function stopStatsStream() {
+  if (statsAbort) { statsAbort.abort(); statsAbort = null; }
+}
+
+// Keep the uptime card ticking client-side between server pushes, and push
+// a history sample every second so the chart's time window keeps moving.
+setInterval(() => {
+  if ($('panel-view').classList.contains('hidden')) return;
+  if (statsStartedAt) {
+    const el = $('stat-uptime');
+    if (el) el.textContent = fmtUptime(Math.floor((Date.now() - statsStartedAt) / 1000));
+  }
+  const last = HISTORY.length ? HISTORY[HISTORY.length - 1].connections : 0;
+  pushSample(last);
+}, 1000);
+
+async function loadSettings() {
+  const data = await api('/api/settings');
+  defs = data.defs;
+  const groups = {};
+  for (const def of data.defs) {
+    (groups[def.group] || (groups[def.group] = [])).push(def);
+  }
+  $('settings').innerHTML = Object.entries(groups).map(([group, list]) => `
+    <section>
+      <h2>${esc(group)}</h2>
+      ${list.map((def) => {
+        const type = def.kind === 'int' ? 'number' : (def.secret ? 'password' : 'text');
+        const range = def.min != null ? ` min="${def.min}" max="${def.max}"` : '';
+        const toggle = def.secret ? `<button type="button" class="secondary" data-toggle="${def.key}">show</button>` : '';
+        const help = def.help ? `<p class="help">${esc(def.help)}</p>` : '';
+        const apply = def.applyNote ? `<p class="help">Applies after: <code>${esc(def.applyNote)}</code></p>` : '';
+        return `
+          <div class="field" data-key="${def.key}">
+            <label for="f-${def.key}">${esc(def.label)}</label>
+            <div class="row">
+              <input id="f-${def.key}" type="${type}"${range} value="${esc(data.values[def.key] ?? '')}">
+              ${toggle}
+            </div>
+            ${help}${apply}
+          </div>`;
+      }).join('')}
+    </section>`).join('');
+
+  for (const btn of document.querySelectorAll('[data-toggle]')) {
+    btn.addEventListener('click', () => {
+      const input = $('f-' + btn.dataset.toggle);
+      const show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      btn.textContent = show ? 'hide' : 'show';
+    });
+  }
+}
+
+let toastTimer = null;
+function toast(msg, ok) {
+  const el = $('toast');
+  el.className = 'toast ' + (ok ? 'ok' : 'err');
+  el.textContent = msg;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.className = 'toast'; el.textContent = ''; }, 6000);
+}
+
+$('save').addEventListener('click', async () => {
+  const values = {};
+  for (const def of defs) {
+    values[def.key] = $('f-' + def.key).value;
+  }
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'PUT',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, authHeader()),
+      body: JSON.stringify({ values }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      clearCreds();
+      showLogin('Session expired - log in again.');
+      return;
+    }
+    if (!res.ok) {
+      for (const key of Object.keys(body.errors || {})) {
+        const f = $('f-' + key);
+        if (f) f.classList.add('err-field');
+      }
+      const first = Object.values(body.errors || {})[0];
+      toast('Error: ' + (first || res.statusText), false);
+      return;
+    }
+    toast('Settings saved.', true);
+    refreshStats();
+  } catch (e) {
+    toast('Error: ' + e.message, false);
+  }
+});
+
+function enterPanel() {
+  $('auth-view').classList.add('hidden');
+  $('panel-view').classList.remove('hidden');
+  $('logout').classList.remove('hidden');
+  $('version').textContent = '';
+  loadSettings().catch((e) => toast(e instanceof AuthError ? 'Please log in.' : 'Failed to load settings: ' + e.message, false));
+  startStatsStream();
+}
+
+$('logout').addEventListener('click', () => {
+  stopStatsStream();
+  statsStartedAt = null;
+  clearCreds();
+  showLogin();
+});
+
+async function init() {
+  try {
+    const status = await (await fetch('/api/status')).json();
+    if (status.setupRequired) { showSetup(); return; }
+    if (storedCreds()) {
+      try {
+        await api('/api/stats');
+        enterPanel();
+        return;
+      } catch (e) { /* fall through to login */ }
+    }
+    showLogin();
+  } catch (e) {
+    showLogin('Cannot reach the admin API: ' + e.message);
+  }
+}
+
+init();
+</script>
+</body>
+</html>
