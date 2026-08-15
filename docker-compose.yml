@@ -47,7 +47,7 @@ services:
     profiles: ["tunnel"]
     command: tunnel run
     environment:
-      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN:-}
     volumes:
       - relay-data:/data:ro
     restart: unless-stopped
