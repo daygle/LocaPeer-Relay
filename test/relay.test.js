@@ -7,7 +7,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { createHash, randomBytes } = require('node:crypto');
 const WebSocket = require('ws');
-const { schnorr } = require('@noble/curves/secp256k1');
+const { schnorr } = require('@noble/curves/secp256k1.js');
+const { hexToBytes } = require('@noble/curves/utils.js');
 
 const PORT = parseInt(process.env.TEST_PORT ?? '7899', 10);
 const DIST_INDEX = path.join(__dirname, '..', 'dist', 'index.js');
@@ -24,7 +25,7 @@ function makeEvent({ content = 'hello world', tags = [], kind = 1, priv } = {}) 
   const id = createHash('sha256')
     .update(JSON.stringify([0, pubkey, created_at, kind, tags, content]))
     .digest('hex');
-  let sigRaw = schnorr.sign(id, key);
+  let sigRaw = schnorr.sign(hexToBytes(id), key);
   if (typeof sigRaw.toCompactRawBytes === 'function') sigRaw = sigRaw.toCompactRawBytes();
   const sig = Buffer.from(sigRaw).toString('hex');
   return { id, pubkey, created_at, kind, tags, content, sig };
@@ -239,7 +240,7 @@ test('rejects an event with a bad signature', async (t) => {
   const keyA = randomBytes(32);
   const event = makeEvent({ priv: keyA });
   const otherKey = randomBytes(32);
-  let badSig = schnorr.sign(event.id, otherKey);
+  let badSig = schnorr.sign(hexToBytes(event.id), otherKey);
   if (typeof badSig.toCompactRawBytes === 'function') badSig = badSig.toCompactRawBytes();
   event.sig = Buffer.from(badSig).toString('hex');
   client.ws.send(JSON.stringify(['EVENT', event]));
