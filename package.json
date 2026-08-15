@@ -10,7 +10,7 @@
     "test": "npm run build && node --test test/relay.test.js"
   },
   "dependencies": {
-    "@noble/curves": "^1.9.7",
+    "@noble/curves": "^2.3.0",
     "better-sqlite3": "12.8.0",
     "ws": "^8.16.0"
   },

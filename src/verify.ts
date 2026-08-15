@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
-import { schnorr } from '@noble/curves/secp256k1';
+import { schnorr } from '@noble/curves/secp256k1.js';
+import { hexToBytes } from '@noble/curves/utils.js';
 import { NostrEvent } from './types';
 
 // NIP-01 event serialization: the event id is the sha256 of this JSON array.
@@ -21,7 +22,7 @@ export function verifyEventId(event: NostrEvent, serialized?: string): boolean {
 
 export function verifySignature(event: NostrEvent): boolean {
   try {
-    return schnorr.verify(event.sig, event.id, event.pubkey);
+    return schnorr.verify(hexToBytes(event.sig), hexToBytes(event.id), hexToBytes(event.pubkey));
   } catch {
     return false;
   }
