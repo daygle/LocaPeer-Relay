@@ -29,7 +29,7 @@ All settings are environment variables:
 
 ## Running without Docker
 
-**Requirements:** Node.js 18+
+**Requirements:** Node.js 20+
 
 ```bash
 npm install
