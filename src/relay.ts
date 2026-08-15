@@ -1,8 +1,9 @@
 import { EventEmitter } from 'events';
+import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
 import { randomBytes } from 'crypto';
-import { saveEvent, getEvents, eventExists, acquireConnectionLease, renewConnectionLease, releaseConnectionLease, tryAcquireIpRate, pruneIpState, LeaseAcquireResult } from './db';
+import { saveEvent, getEvents, eventExists, acquireConnectionLease, renewConnectionLease, releaseConnectionLease, tryAcquireIpRate, pruneIpState, pruneOldEvents, LeaseAcquireResult } from './db';
 import { validateEvent, verifyEventId, verifySignature, serializeEvent } from './verify';
 import { isTagFilterKey } from './filter';
 import { NostrEvent, Filter, Subscription } from './types';
@@ -21,6 +22,10 @@ const CONN_LEASE_HEARTBEAT_MS = 20_000;
 // How often to prune idle per-IP rate state from the database.
 const IP_STATE_PRUNE_INTERVAL_MS = 60_000;
 const IP_STATE_IDLE_MS = 5 * 60_000;
+
+// How often to check for old events to prune (retention policy).
+const RETENTION_CHECK_INTERVAL_MS = 60 * 60_000; // check hourly
+let lastRetentionCheck = 0;
 
 interface Client {
   ws: WebSocket;
@@ -277,8 +282,23 @@ function cleanupClient(client: Client, token: string): void {
   }
 }
 
-export function createRelay(port: number): WebSocketServer {
-  const wss = new WebSocketServer({ port, maxPayload: 1024 * 1024 });
+// Build NIP-11 relay information response.
+function buildNip11(): object {
+  return {
+    name: settings.getString('RELAY_NAME') || 'LocaPeer Relay',
+    description: settings.getString('RELAY_DESCRIPTION') || 'A self-hosted Nostr relay.',
+    contact: settings.getString('RELAY_CONTACT') || undefined,
+    supported_nips: [1, 2, 4, 11],
+    software: 'locapeer-relay',
+    version: require('../package.json').version || 'unknown',
+  };
+}
+
+export function createRelay(port: number): http.Server {
+  // Create an HTTP server so we can handle NIP-11 requests before the
+  // WebSocket upgrade. ws attaches to the 'upgrade' event.
+  const httpServer = http.createServer();
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 
   // Keep leases for this process's connections alive, prune idle per-IP rate
   // state, and pick up settings changes made in another process. unref() so
@@ -292,6 +312,19 @@ export function createRelay(port: number): WebSocketServer {
         pruneIpState(now - IP_STATE_IDLE_MS);
       } catch (err) {
         error('[!] ip state prune error:', err);
+      }
+    }
+    // Retention: prune events older than RETENTION_DAYS (if > 0).
+    if (now - lastRetentionCheck >= RETENTION_CHECK_INTERVAL_MS) {
+      lastRetentionCheck = now;
+      const days = settings.getInt('RETENTION_DAYS');
+      if (days > 0) {
+        try {
+          const deleted = pruneOldEvents(days * 86400);
+          if (deleted > 0) log(`[retention] pruned ${deleted} events older than ${days}d`);
+        } catch (err) {
+          error('[!] retention prune error:', err);
+        }
       }
     }
     for (const [client, token] of clientLeases) {
@@ -338,6 +371,34 @@ export function createRelay(port: number): WebSocketServer {
     timer.unref();
   }
   scheduleNextPing();
+
+  // Handle HTTP requests: NIP-11 relay information.
+  httpServer.on('request', (req: http.IncomingMessage, res: http.ServerResponse) => {
+    if (req.method === 'GET' && (req.url === '/' || req.url === '')) {
+      // Check for NIP-11 Accept header.
+      if (req.headers.accept === 'application/nostr+json') {
+        res.writeHead(200, {
+          'Content-Type': 'application/nostr+json',
+          'Access-Control-Allow-Origin': '*',
+        });
+        res.end(JSON.stringify(buildNip11()));
+        return;
+      }
+      // Regular HTTP request - return 426 Upgrade Required.
+      res.writeHead(426, { 'Content-Type': 'text/plain' });
+      res.end('426 Upgrade Required');
+      return;
+    }
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('404 Not Found');
+  });
+
+  // Handle WebSocket upgrades, passing to ws.
+  httpServer.on('upgrade', (req: http.IncomingMessage, socket: import('net').Socket, head: Buffer) => {
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit('connection', ws, req);
+    });
+  });
 
   wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
     const ip = req.socket.remoteAddress ?? 'unknown';
@@ -424,7 +485,23 @@ export function createRelay(port: number): WebSocketServer {
     send(ws, ['NOTICE', 'welcome to locapeer-relay']);
   });
 
-  return wss;
+  // Start listening on the HTTP server (which also handles upgrades).
+  httpServer.listen(port, () => {
+    log(`locapeer-relay listening on ws://0.0.0.0:${port}`);
+  });
+
+  return httpServer;
+}
+
+// Terminate all connections for shutdown.
+export function terminateAllConnections(): void {
+  for (const client of clients) {
+    try {
+      client.ws.terminate();
+    } catch {
+      // best-effort
+    }
+  }
 }
 
 // Live stats for the admin panel.

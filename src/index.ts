@@ -1,4 +1,4 @@
-import { createRelay } from './relay';
+import { createRelay, terminateAllConnections } from './relay';
 import { startAdminServer, getVersion } from './admin';
 import { log, error } from './log';
 
@@ -8,21 +8,14 @@ if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
   process.exit(1);
 }
 
-const wss = createRelay(PORT);
-
-wss.on('listening', () => {
-  log(`locapeer-relay v${getVersion()} listening on ws://0.0.0.0:${PORT}`);
-});
+const server = createRelay(PORT);
 
 startAdminServer();
 
 function shutdown(signal: string): void {
   log(`${signal} received, shutting down...`);
-  // Terminate open connections so wss.close() doesn't hang on idle clients.
-  for (const client of wss.clients) {
-    client.terminate();
-  }
-  wss.close(() => process.exit(0));
+  terminateAllConnections();
+  server.close(() => process.exit(0));
 }
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));

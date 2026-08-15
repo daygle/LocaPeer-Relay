@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { settings, SETTING_DEFS } from './settings';
-import { countEvents, getDbSizeBytes } from './db';
+import { countEvents, getDbSizeBytes, auditLog, getAuditLog } from './db';
 import { getActiveConnections, getMaxConnectionsSeen, getConnectionsPerIp, relayEvents } from './relay';
 import { isAdminConfigured, createAdminAccount, verifyAdmin } from './auth';
 import { log, error } from './log';
@@ -167,6 +167,19 @@ export function getVersion(): string {
   return version;
 }
 
+function isTunnelHealthy(): boolean {
+  try {
+    const tunnelToken = settings.getString('TUNNEL_TOKEN');
+    if (!tunnelToken) return false;
+    // Check if cloudflared process is running (basic check).
+    const { execSync } = require('child_process');
+    const result = execSync('pgrep -f cloudflared || echo none', { encoding: 'utf8' }).trim();
+    return result !== 'none';
+  } catch {
+    return false;
+  }
+}
+
 function getStats(): Record<string, unknown> {
   return {
     version: getVersion(),
@@ -177,6 +190,7 @@ function getStats(): Record<string, unknown> {
     events: countEvents(),
     dbSizeBytes: getDbSizeBytes(),
     uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000),
+    tunnelHealthy: isTunnelHealthy(),
   };
 }
 
@@ -246,6 +260,38 @@ export function startAdminServer(): http.Server {
         return;
       }
 
+      // Prometheus metrics endpoint - unauthenticated for scraping.
+      if (req.method === 'GET' && pathname === '/metrics') {
+        const stats = getStats();
+        const lines = [
+          '# HELP relay_connections Current active WebSocket connections.',
+          '# TYPE relay_connections gauge',
+          `relay_connections ${stats.connections}`,
+          '',
+          '# HELP relay_connections_seen_max Maximum connections seen since startup.',
+          '# TYPE relay_connections_seen_max gauge',
+          `relay_connections_seen_max ${stats.maxConnectionsSeen}`,
+          '',
+          '# HELP relay_events_total Total events stored in the database.',
+          '# TYPE relay_events_total gauge',
+          `relay_events_total ${stats.events}`,
+          '',
+          '# HELP relay_db_size_bytes Database file size in bytes.',
+          '# TYPE relay_db_size_bytes gauge',
+          `relay_db_size_bytes ${stats.dbSizeBytes}`,
+          '',
+          '# HELP relay_uptime_seconds Relay uptime in seconds.',
+          '# TYPE relay_uptime_seconds gauge',
+          `relay_uptime_seconds ${stats.uptimeSeconds}`,
+          '',
+        ];
+        writeHead(res, 200, {
+          'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
+        });
+        res.end(lines.join('\n'));
+        return;
+      }
+
       // First-run account creation; only allowed before an account exists.
       if (req.method === 'POST' && pathname === '/api/setup') {
         if (isAdminConfigured()) {
@@ -253,11 +299,13 @@ export function startAdminServer(): http.Server {
           return;
         }
         const body = JSON.parse(await readBody(req)) as { username?: unknown; password?: unknown };
+        const setupIp = req.socket.remoteAddress ?? 'unknown';
         const errors = createAdminAccount(body.username, body.password);
         if (errors.length > 0) {
           sendJson(res, 400, { errors });
           return;
         }
+        auditLog('admin_setup', setupIp, String(body.username));
         sendJson(res, 200, { ok: true });
         return;
       }
@@ -283,11 +331,13 @@ export function startAdminServer(): http.Server {
       const creds = parseBasicAuth(req);
       if (!creds || !verifyAdmin(creds.username, creds.password)) {
         recordLoginFailure(ip, now);
+        auditLog('login_failure', ip, creds?.username ?? 'unknown');
         writeHead(res, 401, { 'WWW-Authenticate': 'Basic realm="LocaPeer Relay Admin"' });
         res.end('Unauthorized');
         return;
       }
       loginFailures.delete(ip);
+      auditLog('login_success', ip, creds.username);
 
       if (req.method === 'GET' && pathname === '/api/stats/stream') {
         writeHead(res, 200, {
@@ -313,8 +363,16 @@ export function startAdminServer(): http.Server {
         return;
       }
 
+      if (req.method === 'GET' && pathname === '/api/audit') {
+        const limit = parseInt(new URL(req.url || '/', 'http://localhost').searchParams.get('limit') || '100', 10);
+        sendJson(res, 200, { entries: getAuditLog(limit) });
+        return;
+      }
+
       if (req.method === 'PUT' && pathname === '/api/settings') {
         const body = JSON.parse(await readBody(req)) as { values?: Record<string, unknown> };
+        const ip = req.socket.remoteAddress ?? 'unknown';
+        auditLog('settings_change', ip, JSON.stringify(body.values));
         const errors = settings.setMany(body.values ?? {});
         if (Object.keys(errors).length > 0) {
           sendJson(res, 400, { errors });

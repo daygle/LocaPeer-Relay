@@ -27,6 +27,11 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '2.0'
     restart: unless-stopped
 
   # Optional: expose the relay through a Cloudflare Tunnel so clients reach

@@ -72,8 +72,12 @@ What you can do:
   next to the database so the cloudflared container picks it up on its next
   start (`docker compose restart cloudflared`).
 - **Watch live stats** - active/peak connections, per-IP connection counts,
-  events stored, database size, uptime, updated instantly via
-  Server-Sent Events (no polling).
+  events stored, database size, uptime, tunnel status, updated instantly
+  via Server-Sent Events (no polling).
+- **Configure relay identity (NIP-11)** - set name, description, and
+  contact info returned in relay information responses.
+- **Set event retention** - automatically prune events older than N days
+  (or keep forever by default).
 
 First run: the first time you open the panel it asks you to create the
 admin username and password. The credentials are stored (scrypt-hashed with
@@ -122,6 +126,27 @@ npm test
 The suite uses Node's built-in test runner (`node --test`) and requires no
 additional dependencies. Test databases are created in `test/.tmp/` and
 cleaned up after each run.
+
+## Prometheus metrics
+
+The admin server exposes a Prometheus-compatible metrics endpoint at
+`GET /metrics` (unauthenticated, LAN-only). It returns the following gauges:
+
+- `relay_connections` - current active WebSocket connections
+- `relay_connections_seen_max` - peak connections since startup
+- `relay_events_total` - total events stored in the database
+- `relay_db_size_bytes` - database file size
+- `relay_uptime_seconds` - relay uptime
+
+Example Prometheus scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: locapeer-relay
+    static_configs:
+      - targets: ['192.168.10.108:8080']
+    metrics_path: /metrics
+```
 
 ## Updating
 

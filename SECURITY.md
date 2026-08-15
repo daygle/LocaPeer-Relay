@@ -97,6 +97,15 @@ authentication, authorization, or encryption at the relay level:
   `ADMIN_PORT` off the public internet entirely.
 - **Watch the logs.** Connection open/close and per-client error lines are
   written to stdout; forward them somewhere you can review.
+- **Set event retention.** By default events are stored forever. Use the
+  `RETENTION_DAYS` setting in the admin panel to automatically prune events
+  older than N days, preventing unbounded database growth.
+- **Review the audit log.** The admin panel logs settings changes, login
+  attempts (success and failure), and admin account creation to an audit
+  table in the database. Access via `GET /api/audit` (authenticated).
+- **Prometheus metrics are unauthenticated.** The `/metrics` endpoint is
+  meant for internal monitoring only. Keep port `ADMIN_PORT` off the public
+  internet to prevent metrics leakage.
 
 ## Known limitations
 

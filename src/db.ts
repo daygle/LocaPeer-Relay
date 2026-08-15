@@ -58,6 +58,15 @@ db.exec(`
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    ip TEXT,
+    detail TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
 `);
 
 const insertEvent = db.prepare(`
@@ -326,3 +335,40 @@ export function getDbSizeBytes(): number {
     return 0;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Event retention pruning
+// ---------------------------------------------------------------------------
+
+const deleteOldEvents = db.prepare(`
+  DELETE FROM events WHERE created_at < ?
+`);
+
+export function pruneOldEvents(olderThanSeconds: number): number {
+  const cutoff = Math.floor(Date.now() / 1000) - olderThanSeconds;
+  const result = deleteOldEvents.run(cutoff);
+  return result.changes;
+}
+
+// ---------------------------------------------------------------------------
+// Audit log
+// ---------------------------------------------------------------------------
+
+const insertAudit = db.prepare(
+  'INSERT INTO audit_log (ts, action, ip, detail) VALUES (?, ?, ?, ?)'
+);
+const recentAudit = db.prepare(
+  'SELECT ts, action, ip, detail FROM audit_log ORDER BY id DESC LIMIT ?'
+);
+const pruneAudit = db.prepare('DELETE FROM audit_log WHERE id NOT IN (SELECT id FROM audit_log ORDER BY id DESC LIMIT 1000)');
+
+export function auditLog(action: string, ip: string | null, detail: string | null): void {
+  insertAudit.run(Math.floor(Date.now() / 1000), action, ip, detail);
+  // Keep the table bounded.
+  pruneAudit.run();
+}
+
+export function getAuditLog(limit: number = 100): Array<{ ts: number; action: string; ip: string | null; detail: string | null }> {
+  return recentAudit.all(Math.min(limit, 500)) as Array<{ ts: number; action: string; ip: string | null; detail: string | null }>;
+}
+

@@ -48,6 +48,18 @@
   }
   .ver { color: var(--muted); font-size: 12px; font-family: var(--mono); }
   .spacer { flex: 1; }
+  .nav { display: flex; gap: 6px; margin-bottom: 22px; }
+  .nav .tab {
+    background: none;
+    color: var(--muted);
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 7px 14px;
+    font-size: 13px;
+    font-weight: 550;
+  }
+  .nav .tab:hover { color: var(--text); background: rgba(91, 124, 250, 0.08); }
+  .nav .tab.active { color: var(--text); background: var(--panel); border-color: var(--border); }
   .banner {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -151,28 +163,36 @@
     <h1>LocaPeer Relay</h1>
     <span class="ver" id="version"></span>
     <span class="spacer"></span>
-    <button class="link hidden" id="logout">log out</button>
+    <button class="link hidden" id="logout">Log Out</button>
   </header>
 
   <div id="auth-view"></div>
 
   <div id="panel-view" class="hidden">
-    <div class="banner">
-      Admin panel - internal access only. Do not expose this port publicly (do not add it to the
-      Cloudflare tunnel or a public reverse proxy). Settings apply immediately, except the tunnel
-      token, which takes effect after a <code>docker compose restart cloudflared</code>.
+    <div class="nav">
+      <button class="tab active" data-view="dashboard">Dashboard</button>
+      <button class="tab" data-view="settings">Settings</button>
     </div>
-    <div class="stats" id="stats"></div>
-    <section>
-      <h2>Connections Over Time <span class="chip" id="history-current"></span></h2>
-      <canvas id="history"></canvas>
-    </section>
-    <div id="settings"></div>
-    <div class="actions">
-      <button id="save">Save settings</button>
-      <span id="toast" class="toast"></span>
+    <div id="dashboard-view">
+      <div class="banner">
+        Admin panel - internal access only. Do not expose this port publicly (do not add it to the
+        Cloudflare tunnel or a public reverse proxy). Settings apply immediately, except the tunnel
+        token, which takes effect after a <code>docker compose restart cloudflared</code>.
+      </div>
+      <div class="stats" id="stats"></div>
+      <section>
+        <h2>Connections Over Time <span class="chip" id="history-current"></span></h2>
+        <canvas id="history"></canvas>
+      </section>
     </div>
-    <footer>Settings are stored in the relay database and override environment defaults. The admin account is created on first login and also lives in the database.</footer>
+    <div id="settings-view" class="hidden">
+      <div id="settings"></div>
+      <div class="actions">
+        <button id="save">Save settings</button>
+        <span id="toast" class="toast"></span>
+      </div>
+      <footer>Settings are stored in the relay database and override environment defaults. The admin account is created on first login and also lives in the database.</footer>
+    </div>
   </div>
 </div>
 <script nonce="__CSP_NONCE__">
@@ -310,14 +330,16 @@ function fmtUptime(s) {
 function renderStats(s) {
   statsStartedAt = s.startedAt || null;
   $('version').textContent = 'v' + esc(s.version);
+  const tunnelStatus = s.tunnelHealthy ? '<span style="color:var(--accent-2)">&#9679;</span> Connected' : '<span style="color:var(--muted)">&#9679;</span> Not running';
   $('stats').innerHTML = [
     ['Active connections', s.connections],
     ['Peak connections', s.maxConnectionsSeen],
     ['Events stored', s.events],
     ['Database size', fmtBytes(s.dbSizeBytes)],
     ['Uptime', fmtUptime(s.uptimeSeconds)],
+    ['Tunnel', tunnelStatus],
   ].map(([k, v], i) =>
-    '<div class="card"><div class="k">' + k + '</div><div class="v"' + (i === 4 ? ' id="stat-uptime"' : '') + '>' + esc(v) + '</div></div>'
+    '<div class="card"><div class="k">' + k + '</div><div class="v"' + (i === 4 ? ' id="stat-uptime"' : '') + '>' + v + '</div></div>'
   ).join('');
   pushSample(s.connections);
 }
@@ -586,16 +608,30 @@ $('save').addEventListener('click', async () => {
       return;
     }
     toast('Settings saved.', true);
-    refreshStats();
   } catch (e) {
     toast('Error: ' + e.message, false);
   }
 });
 
+// Dashboard / Settings tabs. The stats stream keeps running on either tab
+// so the chart and header stay current when you switch back.
+for (const tab of document.querySelectorAll('.tab')) {
+  tab.addEventListener('click', () => {
+    for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t === tab);
+    $('dashboard-view').classList.toggle('hidden', tab.dataset.view !== 'dashboard');
+    $('settings-view').classList.toggle('hidden', tab.dataset.view !== 'settings');
+    if (tab.dataset.view === 'dashboard') drawHistory(); // redraw at visible width
+  });
+}
+
 function enterPanel() {
   $('auth-view').classList.add('hidden');
   $('panel-view').classList.remove('hidden');
   $('logout').classList.remove('hidden');
+  // Always land on the dashboard after login/setup.
+  for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.dataset.view === 'dashboard');
+  $('dashboard-view').classList.remove('hidden');
+  $('settings-view').classList.add('hidden');
   $('version').textContent = '';
   loadSettings().catch((e) => toast(e instanceof AuthError ? 'Please log in.' : 'Failed to load settings: ' + e.message, false));
   startStatsStream();

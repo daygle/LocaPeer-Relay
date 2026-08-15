@@ -148,6 +148,40 @@ export const SETTING_DEFS: SettingDef[] = [
     applyNote: 'docker compose restart cloudflared',
     help: 'Written to tunnel.env next to the database so the cloudflared container picks it up on its next start.',
   },
+  {
+    key: 'RETENTION_DAYS',
+    kind: 'int',
+    default: 0,
+    min: 0,
+    max: 36500,
+    group: 'Data Retention',
+    label: 'Event Retention (Days)',
+    help: 'Delete events older than this many days. Set to 0 to keep events forever (default).',
+  },
+  {
+    key: 'RELAY_NAME',
+    kind: 'string',
+    default: 'LocaPeer Relay',
+    group: 'Relay Identity (NIP-11)',
+    label: 'Relay Name',
+    help: 'Displayed in NIP-11 relay information and browser tabs.',
+  },
+  {
+    key: 'RELAY_DESCRIPTION',
+    kind: 'string',
+    default: 'A self-hosted Nostr relay for the LocaPeer network.',
+    group: 'Relay Identity (NIP-11)',
+    label: 'Relay Description',
+    help: 'Short description returned in NIP-11 relay information responses.',
+  },
+  {
+    key: 'RELAY_CONTACT',
+    kind: 'string',
+    default: '',
+    group: 'Relay Identity (NIP-11)',
+    label: 'Relay Contact',
+    help: 'Contact address (e.g. email, npub) returned in NIP-11. Optional.',
+  },
 ];
 
 const DEFS_BY_KEY = new Map(SETTING_DEFS.map((d) => [d.key, d]));
