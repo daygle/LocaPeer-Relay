@@ -23,6 +23,8 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_pubkey ON events(pubkey);
   CREATE INDEX IF NOT EXISTS idx_kind ON events(kind);
   CREATE INDEX IF NOT EXISTS idx_created_at ON events(created_at);
+  CREATE INDEX IF NOT EXISTS idx_kind_created ON events(kind, created_at);
+  CREATE INDEX IF NOT EXISTS idx_pubkey_created ON events(pubkey, created_at);
 
   CREATE TABLE IF NOT EXISTS tags (
     event_id TEXT NOT NULL,

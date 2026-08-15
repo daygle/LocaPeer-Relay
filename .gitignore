@@ -3,4 +3,5 @@ dist/
 *.db
 *.db-shm
 *.db-wal
+test/.tmp/
 .env

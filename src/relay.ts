@@ -7,6 +7,8 @@ import { NostrEvent, Filter, Subscription } from './types';
 const MAX_SUBS_PER_CLIENT = parseInt(process.env.MAX_SUBS ?? '20');
 const MAX_FILTERS_PER_SUB = parseInt(process.env.MAX_FILTERS ?? '10');
 const MAX_EVENT_TAGS = parseInt(process.env.MAX_EVENT_TAGS ?? '2500');
+const MAX_FILTER_ARRAY = parseInt(process.env.MAX_FILTER_ARRAY ?? '100');
+const MAX_EVENT_SIZE = parseInt(process.env.MAX_EVENT_SIZE ?? '65536');
 
 interface Client {
   ws: WebSocket;
@@ -43,6 +45,35 @@ function matchesSubscription(event: NostrEvent, sub: Subscription): boolean {
   return sub.filters.some(f => matchesFilter(event, f));
 }
 
+function isStringArray(v: unknown, max: number): v is string[] {
+  return Array.isArray(v) && v.length <= max && v.every(x => typeof x === 'string');
+}
+
+function isInt(v: unknown): v is number {
+  return typeof v === 'number' && Number.isInteger(v);
+}
+
+function validateFilter(f: unknown): f is Filter {
+  if (typeof f !== 'object' || f === null || Array.isArray(f)) return false;
+  const o = f as Record<string, unknown>;
+  for (const [key, value] of Object.entries(o)) {
+    if (key === 'ids' || key === 'authors') {
+      if (!isStringArray(value, MAX_FILTER_ARRAY)) return false;
+    } else if (key === 'kinds') {
+      if (!Array.isArray(value) || value.length > MAX_FILTER_ARRAY || !value.every(v => isInt(v))) return false;
+    } else if (key === 'since' || key === 'until') {
+      if (!isInt(value)) return false;
+    } else if (key === 'limit') {
+      if (!isInt(value) || value <= 0) return false;
+    } else if (key.startsWith('#') && key.length === 2) {
+      // NIP-01 tag filters
+      if (!isStringArray(value, MAX_FILTER_ARRAY)) return false;
+    }
+    // Unknown fields are allowed and ignored, per NIP-01.
+  }
+  return true;
+}
+
 function broadcastEvent(event: NostrEvent): void {
   for (const client of clients) {
     for (const sub of client.subs.values()) {
@@ -61,6 +92,11 @@ function handleEvent(client: Client, data: unknown[]): void {
     return;
   }
   const event = raw as NostrEvent;
+
+  if (JSON.stringify(event).length > MAX_EVENT_SIZE) {
+    send(client.ws, ['OK', event.id, false, 'invalid: event too large']);
+    return;
+  }
 
   if (!verifyEventId(event)) {
     send(client.ws, ['OK', event.id, false, 'invalid: id does not match']);
@@ -108,7 +144,15 @@ function handleReq(client: Client, data: unknown[]): void {
     return;
   }
 
-  const filters = rawFilters as Filter[];
+  const filters: Filter[] = [];
+  for (const raw of rawFilters) {
+    if (!validateFilter(raw)) {
+      send(client.ws, ['NOTICE', 'invalid: malformed filter']);
+      return;
+    }
+    filters.push(raw);
+  }
+
   const sub: Subscription = { id: subId, filters };
   client.subs.set(subId, sub);
 
@@ -141,17 +185,23 @@ function handleMessage(client: Client, raw: string): void {
   }
 
   const verb = data[0];
-  switch (verb) {
-    case 'EVENT': return handleEvent(client, data);
-    case 'REQ':   return handleReq(client, data);
-    case 'CLOSE': return handleClose(client, data);
-    default:
-      send(client.ws, ['NOTICE', `error: unknown message type "${verb}"`]);
+  try {
+    switch (verb) {
+      case 'EVENT': return handleEvent(client, data);
+      case 'REQ':   return handleReq(client, data);
+      case 'CLOSE': return handleClose(client, data);
+      default:
+        send(client.ws, ['NOTICE', `error: unknown message type "${verb}"`]);
+    }
+  } catch (err) {
+    // Never let a single bad message take down the process.
+    console.error(`[!] ${client.ip} handler error:`, err);
+    send(client.ws, ['NOTICE', 'error: internal error']);
   }
 }
 
 export function createRelay(port: number): WebSocketServer {
-  const wss = new WebSocketServer({ port });
+  const wss = new WebSocketServer({ port, maxPayload: 1024 * 1024 });
 
   wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
     const ip = req.socket.remoteAddress ?? 'unknown';
@@ -169,6 +219,7 @@ export function createRelay(port: number): WebSocketServer {
     });
 
     ws.on('error', (err) => {
+      clients.delete(client);
       console.error(`[!] ${ip} error:`, err.message);
     });
 

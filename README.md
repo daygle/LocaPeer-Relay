@@ -43,6 +43,20 @@ For development with live reload:
 npm run dev
 ```
 
+## Testing
+
+The integration suite boots a real relay on `ws://localhost:7899` (override
+with `TEST_PORT`) and exercises malformed REQ/EVENT payloads, signature and
+ID verification, duplicates, and subscription round-trips:
+
+```bash
+npm test
+```
+
+The suite uses Node's built-in test runner (`node --test`) and requires no
+additional dependencies. Test databases are created in `test/.tmp/` and
+cleaned up after each run.
+
 ## Updating
 
 Your event database persists across updates (it lives in the `relay-data`

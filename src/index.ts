@@ -8,12 +8,14 @@ wss.on('listening', () => {
   console.log(`locapeer-relay listening on ws://0.0.0.0:${PORT}`);
 });
 
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down...');
+function shutdown(signal: string): void {
+  console.log(`${signal} received, shutting down...`);
+  // Terminate open connections so wss.close() doesn't hang on idle clients.
+  for (const client of wss.clients) {
+    client.terminate();
+  }
   wss.close(() => process.exit(0));
-});
+}
 
-process.on('SIGINT', () => {
-  console.log('SIGINT received, shutting down...');
-  wss.close(() => process.exit(0));
-});
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
