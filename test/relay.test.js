@@ -773,3 +773,55 @@ test('admin API: saving the tunnel token writes tunnel.env next to the database'
   assert.equal(ok.res.status, 200);
   assert.match(fs.readFileSync(envPath, 'utf8'), /TUNNEL_TOKEN=tok-123/);
 });
+
+test('admin API: health endpoint is unauthenticated and reflects live state', async (t) => {
+  const adminPort = nextAdminPort();
+  const relay = await startRelay({ ADMIN_PORT: String(adminPort) });
+  t.after(() => relay.kill());
+
+  // Works before an admin account exists and without credentials - it is a
+  // liveness probe for Docker healthchecks and uptime monitors.
+  const before = await adminFetch(adminPort, '/api/health');
+  assert.equal(before.res.status, 200, 'expected 200 without auth');
+  assert.equal(before.body.ok, true);
+  assert.equal(typeof before.body.version, 'string');
+  assert.equal(typeof before.body.connections, 'number');
+  assert.equal(typeof before.body.events, 'number');
+
+  // The database must answer a query, so events are real (not a stub).
+  const client = await connect();
+  const event = makeEvent();
+  client.ws.send(JSON.stringify(['EVENT', event]));
+  await waitFor(() => client.messages.some((m) => m[0] === 'OK' && m[1] === event.id && m[2] === true));
+
+  const after = await adminFetch(adminPort, '/api/health');
+  assert.ok(after.body.connections >= 1, 'health should count the open connection');
+  assert.ok(after.body.events >= 1, 'health should count the stored event');
+  client.ws.close();
+});
+
+test('admin API: failed logins lock the IP out of the panel', async (t) => {
+  const adminPort = nextAdminPort();
+  const relay = await startRelay({ ADMIN_PORT: String(adminPort) });
+  t.after(() => relay.kill());
+  await setupAdmin(adminPort);
+
+  const wrong = { Authorization: 'Basic ' + Buffer.from('admin:wrongpass').toString('base64') };
+  const statuses = [];
+  for (let i = 0; i < 5; i++) {
+    const res = await fetch(`http://127.0.0.1:${adminPort}/api/settings`, { headers: wrong });
+    statuses.push(res.status);
+  }
+  assert.deepEqual(statuses, [401, 401, 401, 401, 401], 'expected five rejected attempts');
+
+  // The sixth request is locked out before credentials are even checked, so
+  // even the correct password gets a 429 with Retry-After.
+  const locked = await fetch(`http://127.0.0.1:${adminPort}/api/settings`, {
+    headers: { Authorization: adminAuth() },
+  });
+  assert.equal(locked.status, 429, 'expected 429 once the IP is locked out');
+  assert.ok(Number(locked.headers.get('retry-after')) > 0, 'expected a Retry-After header');
+
+  // The relay itself is unaffected by the lockout.
+  assert.equal(relay.alive(), true);
+});

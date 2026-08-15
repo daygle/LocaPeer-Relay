@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { DB_PATH, getSettingsRows, setSettingValue } from './db';
+import { error } from './log';
 
 // Definitions of the settings surfaced in the admin panel. Each key doubles
 // as the environment variable name, so existing deployments keep working:
@@ -223,7 +224,7 @@ class Settings {
       try {
         setSettingValue(key, value);
       } catch (err) {
-        console.error(`[!] failed to persist setting ${key}:`, err);
+        error(`[!] failed to persist setting ${key}:`, err);
         errors[key] = 'Could not persist';
         continue;
       }
@@ -244,7 +245,7 @@ class Settings {
         if (DEFS_BY_KEY.has(key)) this.values.set(key, value);
       }
     } catch (err) {
-      console.error('[!] settings reload error:', err);
+      error('[!] settings reload error:', err);
     }
     this.lastReload = Date.now();
   }
@@ -272,7 +273,7 @@ class Settings {
       }
       fs.renameSync(tmp, this.tunnelEnvPath);
     } catch (err) {
-      console.error('[!] failed to write tunnel.env:', err);
+      error('[!] failed to write tunnel.env:', err);
     }
   }
 }

@@ -88,7 +88,13 @@ authentication, authorization, or encryption at the relay level:
   `IP_CONNECT_BURST`, `RATE_LIMIT_MESSAGES`, `RATE_LIMIT_BURST`). The
   defaults are generous for a small self-hosted relay.
 - **Back up the database.** Events live in the `relay-data` Docker volume
-  (or the `DB_PATH` file) and are not recoverable otherwise.
+  (or the `DB_PATH` file) and are not recoverable otherwise. Run
+  `scripts/backup.sh` (safe while the relay is up) on a schedule and copy
+  the resulting `backups/` files off the box - restore steps are in the
+  README Maintenance section.
+- **Protect the admin login.** Failed logins are throttled per IP (5 strikes
+  then a 15-minute lockout), but the panel is plain HTTP, so keep port
+  `ADMIN_PORT` off the public internet entirely.
 - **Watch the logs.** Connection open/close and per-client error lines are
   written to stdout; forward them somewhere you can review.
 

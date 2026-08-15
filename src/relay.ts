@@ -7,6 +7,7 @@ import { validateEvent, verifyEventId, verifySignature, serializeEvent } from '.
 import { isTagFilterKey } from './filter';
 import { NostrEvent, Filter, Subscription } from './types';
 import { settings } from './settings';
+import { log, error } from './log';
 
 // Maximum consecutive rate-limit violations before a connection is closed.
 const RATE_LIMIT_MAX_VIOLATIONS = 10;
@@ -260,7 +261,7 @@ function handleMessage(client: Client, raw: string): void {
     }
   } catch (err) {
     // Never let a single bad message take down the process.
-    console.error(`[!] ${client.ip} handler error:`, err);
+    error(`[!] ${client.ip} handler error:`, err);
     send(client.ws, ['NOTICE', 'error: internal error']);
   }
 }
@@ -272,7 +273,7 @@ function cleanupClient(client: Client, token: string): void {
   try {
     releaseConnectionLease(token);
   } catch (err) {
-    console.error('[!] lease release error:', err);
+    error('[!] lease release error:', err);
   }
 }
 
@@ -290,7 +291,7 @@ export function createRelay(port: number): WebSocketServer {
       try {
         pruneIpState(now - IP_STATE_IDLE_MS);
       } catch (err) {
-        console.error('[!] ip state prune error:', err);
+        error('[!] ip state prune error:', err);
       }
     }
     for (const [client, token] of clientLeases) {
@@ -298,7 +299,7 @@ export function createRelay(port: number): WebSocketServer {
         try {
           renewConnectionLease(token, CONN_LEASE_TTL_MS);
         } catch (err) {
-          console.error('[!] lease renew error:', err);
+          error('[!] lease renew error:', err);
         }
       }
     }
@@ -317,7 +318,7 @@ export function createRelay(port: number): WebSocketServer {
         try {
           client.ws.terminate();
         } catch (err) {
-          console.error('[!] keepalive terminate error:', err);
+          error('[!] keepalive terminate error:', err);
         }
         continue;
       }
@@ -325,7 +326,7 @@ export function createRelay(port: number): WebSocketServer {
       try {
         client.ws.ping();
       } catch (err) {
-        console.error('[!] keepalive ping error:', err);
+        error('[!] keepalive ping error:', err);
       }
     }
   }
@@ -353,7 +354,7 @@ export function createRelay(port: number): WebSocketServer {
     try {
       rateOk = tryAcquireIpRate(ip, settings.getInt('IP_CONNECT_RATE'), settings.getInt('IP_CONNECT_BURST'));
     } catch (err) {
-      console.error('[!] ip rate error:', err);
+      error('[!] ip rate error:', err);
     }
     if (!rateOk) {
       send(ws, ['NOTICE', 'error: connection rate limit exceeded, try again later']);
@@ -374,7 +375,7 @@ export function createRelay(port: number): WebSocketServer {
         maxConnectionsPerIp: settings.getInt('MAX_CONNECTIONS_PER_IP'),
       });
     } catch (err) {
-      console.error('[!] lease acquire error:', err);
+      error('[!] lease acquire error:', err);
     }
     if (lease !== 'ok') {
       const message = lease === 'max-per-ip'
@@ -400,7 +401,7 @@ export function createRelay(port: number): WebSocketServer {
     }
     clientLeases.set(client, leaseToken);
     relayEvents.emit('stats');
-    console.log(`[+] ${ip} connected (total: ${clients.size})`);
+    log(`[+] ${ip} connected (total: ${clients.size})`);
 
     ws.on('message', (buf) => {
       handleMessage(client, buf.toString());
@@ -412,12 +413,12 @@ export function createRelay(port: number): WebSocketServer {
 
     ws.on('close', () => {
       cleanupClient(client, leaseToken);
-      console.log(`[-] ${ip} disconnected (total: ${clients.size})`);
+      log(`[-] ${ip} disconnected (total: ${clients.size})`);
     });
 
     ws.on('error', (err) => {
       cleanupClient(client, leaseToken);
-      console.error(`[!] ${ip} error:`, err.message);
+      error(`[!] ${ip} error:`, err.message);
     });
 
     send(ws, ['NOTICE', 'welcome to locapeer-relay']);

@@ -6,6 +6,7 @@ import { settings, SETTING_DEFS } from './settings';
 import { countEvents, getDbSizeBytes } from './db';
 import { getActiveConnections, getMaxConnectionsSeen, getConnectionsPerIp, relayEvents } from './relay';
 import { isAdminConfigured, createAdminAccount, verifyAdmin } from './auth';
+import { log, error } from './log';
 
 // The admin panel is meant to be reachable only from your internal network:
 // publish this port on the host (compose does this) and do NOT route it
@@ -21,6 +22,47 @@ const FAVICON_PATH = path.join(__dirname, '..', 'admin', 'favicon.svg');
 const sseClients = new Set<http.ServerResponse>();
 const STARTED_AT = Date.now();
 const SSE_HEARTBEAT_MS = 30_000;
+
+// Brute-force protection: track failed admin logins per IP and lock out an
+// address that exceeds the threshold for a cooldown period.
+const LOGIN_MAX_FAILURES = 5;
+const LOGIN_WINDOW_MS = 10 * 60_000;
+const LOGIN_LOCKOUT_MS = 15 * 60_000;
+
+interface LoginAttempts {
+  count: number;
+  first: number;
+  lockedUntil: number;
+}
+
+const loginFailures = new Map<string, LoginAttempts>();
+
+function loginLockedSeconds(ip: string, now: number): number {
+  const entry = loginFailures.get(ip);
+  if (!entry || entry.lockedUntil <= now) return 0;
+  return Math.ceil((entry.lockedUntil - now) / 1000);
+}
+
+function recordLoginFailure(ip: string, now: number): void {
+  let entry = loginFailures.get(ip);
+  if (!entry || entry.lockedUntil > 0 || now - entry.first > LOGIN_WINDOW_MS) {
+    entry = { count: 0, first: now, lockedUntil: 0 };
+    loginFailures.set(ip, entry);
+  }
+  entry.count += 1;
+  if (entry.count >= LOGIN_MAX_FAILURES) {
+    entry.lockedUntil = now + LOGIN_LOCKOUT_MS;
+  }
+}
+
+// Periodically drop expired failure state so the map stays bounded.
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of loginFailures) {
+    if (entry.lockedUntil > 0 && entry.lockedUntil <= now) loginFailures.delete(ip);
+    else if (entry.lockedUntil === 0 && now - entry.first > LOGIN_WINDOW_MS) loginFailures.delete(ip);
+  }
+}, 5 * 60_000).unref();
 
 function loadIndexHtml(): string {
   try {
@@ -112,7 +154,7 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   });
 }
 
-function getVersion(): string {
+export function getVersion(): string {
   let version = 'unknown';
   try {
     const pkg = JSON.parse(
@@ -191,6 +233,19 @@ export function startAdminServer(): http.Server {
         return;
       }
 
+      // Liveness probe for Docker healthchecks and uptime monitors. Kept
+      // unauthenticated on purpose (the admin port is LAN-only); it also
+      // verifies the database answers a query.
+      if (req.method === 'GET' && pathname === '/api/health') {
+        sendJson(res, 200, {
+          ok: true,
+          version: getVersion(),
+          connections: getActiveConnections(),
+          events: countEvents(),
+        });
+        return;
+      }
+
       // First-run account creation; only allowed before an account exists.
       if (req.method === 'POST' && pathname === '/api/setup') {
         if (isAdminConfigured()) {
@@ -212,12 +267,27 @@ export function startAdminServer(): http.Server {
         sendJson(res, 401, { error: 'Admin account not configured' });
         return;
       }
+      // Gate failed attempts by IP so the login cannot be brute-forced.
+      const ip = req.socket.remoteAddress ?? 'unknown';
+      const now = Date.now();
+      const lockedFor = loginLockedSeconds(ip, now);
+      if (lockedFor > 0) {
+        writeHead(res, 429, { 'Retry-After': String(lockedFor) });
+        res.end(JSON.stringify({
+          error: 'Too many failed attempts - try again later',
+          retryAfterSeconds: lockedFor,
+        }));
+        return;
+      }
+
       const creds = parseBasicAuth(req);
       if (!creds || !verifyAdmin(creds.username, creds.password)) {
+        recordLoginFailure(ip, now);
         writeHead(res, 401, { 'WWW-Authenticate': 'Basic realm="LocaPeer Relay Admin"' });
         res.end('Unauthorized');
         return;
       }
+      loginFailures.delete(ip);
 
       if (req.method === 'GET' && pathname === '/api/stats/stream') {
         writeHead(res, 200, {
@@ -269,13 +339,13 @@ export function startAdminServer(): http.Server {
   // (e.g. two processes racing to bind, or another service on the port).
   server.on('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'EADDRINUSE') {
-      console.error(`[admin] port ${ADMIN_PORT} already in use - admin panel disabled`);
+      error(`[admin] port ${ADMIN_PORT} already in use - admin panel disabled`);
     } else {
-      console.error('[admin] server error:', err);
+      error('[admin] server error:', err);
     }
   });
 
   server.listen(ADMIN_PORT, ADMIN_HOST);
-  console.log(`admin panel on http://${ADMIN_HOST}:${ADMIN_PORT}`);
+  log(`admin panel on http://${ADMIN_HOST}:${ADMIN_PORT}`);
   return server;
 }

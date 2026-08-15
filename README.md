@@ -158,6 +158,56 @@ npm start         # or restart your service (systemd, pm2, etc.)
 > **Note:** Signature verification applies only to events received after the
 > update. Events already stored from a previous version are not re-validated.
 
+## Maintenance
+
+### Backing up the database
+
+The relay ships `scripts/backup.sh`, which uses better-sqlite3's online
+backup API inside the running container - safe to run while the relay is up
+(WAL mode keeps the backup consistent), and it pipes the result straight to
+the host, so nothing is left in the volume:
+
+```bash
+./scripts/backup.sh            # writes ./backups/relay-<timestamp>.db
+BACKUP_DIR=/mnt/backups ./scripts/backup.sh   # custom location
+KEEP=14 ./scripts/backup.sh    # keep 14 backups instead of the default 7
+```
+
+Backups go to `backups/` (git-ignored) and are pruned to the newest `KEEP`
+(default 7). Copy them off the box regularly - a cron job plus rclone or
+syncthing is enough. The `relay-data` volume is the only place events live,
+so a backup on a second disk (or machine) is what actually protects you.
+
+### Restoring a backup
+
+1. Stop the relay: `docker compose stop relay`.
+2. Replace the database in the volume. With a named volume, run a one-off
+   container to copy the file in:
+
+   ```bash
+   docker run --rm -v locapeer-relay_relay-data:/data \
+     -v "$(pwd)/backups:/backup" alpine \
+     sh -c 'cp /backup/relay-<timestamp>.db /data/relay.db'
+   ```
+
+3. Start it again: `docker compose start relay`.
+
+The relay opens the database with WAL mode and never migrates it, so a
+restored file from the same (or an older) version works as-is.
+
+### Health checks
+
+`docker compose ps` shows the relay's health status - the container runs a
+healthcheck that probes `GET /api/health` on the admin port. The endpoint
+is unauthenticated (it is LAN-only and also useful for uptime monitors)
+and reports `ok`, the version, live connection count, and stored events.
+
+### Admin login protection
+
+The admin API throttles failed logins per IP: 5 failures in a row lock that
+IP out for 15 minutes (a 429 with `Retry-After`). Successful logins reset
+the counter.
+
 ## Reverse proxy with HAProxy (recommended)
 
 If you are using OPNsense HAProxy for TLS termination, configure your backend to forward to `<server-ip>:7777` with plain `ws://`. HAProxy handles `wss://` on port 443 and passes plain WebSocket traffic through to the relay.
