@@ -47,11 +47,11 @@ async function killRelay(relay) {
   }
 }
 
-async function startRelay() {
+async function startRelay(extraEnv = {}, opts = {}) {
   fs.mkdirSync(TMP_DIR, { recursive: true });
-  const dbPath = path.join(TMP_DIR, `test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+  const dbPath = opts.dbPath ?? path.join(TMP_DIR, `test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
   const child = spawn(process.execPath, [DIST_INDEX], {
-    env: { ...process.env, PORT: String(PORT), DB_PATH: dbPath },
+    env: { ...process.env, PORT: String(opts.port ?? PORT), DB_PATH: dbPath, ...extraEnv },
     stdio: 'ignore',
   });
   const relay = { child, dbPath, alive: () => child.exitCode === null };
@@ -60,11 +60,13 @@ async function startRelay() {
   // Wait until the server accepts connections.
   await new Promise((resolve, reject) => {
     const poll = setInterval(() => {
-      const probe = new WebSocket(`ws://127.0.0.1:${PORT}`);
+      const probe = new WebSocket(`ws://127.0.0.1:${opts.port ?? PORT}`);
       probe.on('open', () => {
         clearInterval(poll);
+        // Wait for the server to process our close so readiness implies the
+        // probe no longer holds a connection slot, lease, or rate token.
+        probe.on('close', resolve);
         probe.close();
-        resolve();
       });
       probe.on('error', () => {});
     }, 100);
@@ -81,14 +83,28 @@ async function startRelay() {
   return relay;
 }
 
-function connect() {
+function connect(port = PORT) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${PORT}`);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
     const messages = [];
     ws.on('message', (buf) => messages.push(JSON.parse(buf.toString())));
     ws.on('open', () => resolve({ ws, messages }));
     ws.on('error', reject);
   });
+}
+
+// Keep trying to connect until the relay accepts us (welcome NOTICE), for
+// cases where a slot must first free up asynchronously.
+async function connectUntilWelcome(port, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const c = await connect(port);
+    const welcome = await waitFor(() => c.messages.some((m) => m[0] === 'NOTICE' && m[1].includes('welcome')), 300);
+    if (welcome) return c;
+    c.ws.close();
+    await wait(100);
+  }
+  throw new Error(`relay on port ${port} never accepted a connection`);
 }
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -280,6 +296,184 @@ test('matches NIP-01 #p tag filters', async (t) => {
   const gotEvent = await waitFor(() => client.messages.some((m) => m[0] === 'EVENT' && m[1] === 'tag' && m[2].id === event.id));
   assert.equal(gotEvent, true, 'expected event matching #p filter');
   client.ws.close();
+});
+
+test('matches NIP-01 id prefix filters', async (t) => {
+  const relay = await startRelay();
+  t.after(() => relay.kill());
+
+  const client = await connect();
+  const event = makeEvent();
+  client.ws.send(JSON.stringify(['EVENT', event]));
+  await waitFor(() => client.messages.some((m) => m[0] === 'OK' && m[1] === event.id && m[2] === true));
+
+  // Query by an 8-char id prefix; must still match the stored event.
+  client.ws.send(JSON.stringify(['REQ', 'prefix', { ids: [event.id.slice(0, 8)] }]));
+  const gotEvent = await waitFor(() =>
+    client.messages.some((m) => m[0] === 'EVENT' && m[1] === 'prefix' && m[2].id === event.id)
+  );
+  assert.equal(gotEvent, true, 'expected event matching id prefix');
+  client.ws.close();
+});
+
+// ---------------------------------------------------------------------------
+// Connection limits and rate limiting
+// ---------------------------------------------------------------------------
+
+test('rejects connections over the max-connections cap', async (t) => {
+  const relay = await startRelay({ MAX_CONNECTIONS: '1' });
+  t.after(() => relay.kill());
+
+  const first = await connect();
+  const second = await connect();
+
+  const gotNotice = waitFor(() => second.messages.some((m) => m[0] === 'NOTICE'));
+  const closed = new Promise((resolve) => {
+    second.ws.on('close', () => resolve(true));
+    setTimeout(() => resolve(false), 2000);
+  });
+
+  assert.equal(await gotNotice, true, 'expected NOTICE on rejected connection');
+  assert.equal(await closed, true, 'expected rejected connection to be closed');
+  assert.equal(relay.alive(), true, 'server must survive rejected connections');
+  first.ws.close();
+});
+
+test('rate limits messages per connection and closes after repeated violations', async (t) => {
+  const relay = await startRelay({ RATE_LIMIT_MESSAGES: '60', RATE_LIMIT_BURST: '5' });
+  t.after(() => relay.kill());
+
+  const client = await connect();
+  // Attach the close listener up front so it can't miss an early close.
+  const closed = new Promise((resolve) => {
+    client.ws.on('close', () => resolve(true));
+    setTimeout(() => resolve(false), 2000);
+  });
+
+  // Burst of 5 plus 10 violations before close means ~15 messages kill the
+  // connection; 20 ensures the limit is hit.
+  for (let i = 0; i < 20; i++) {
+    client.ws.send(JSON.stringify(['BOGUS', 'x']));
+  }
+
+  const gotNotice = await waitFor(() => noticesOf(client.messages).some((n) => n.includes('rate limit')));
+  assert.equal(gotNotice, true, 'expected rate-limit NOTICE');
+  assert.equal(await closed, true, 'expected rate-limited connection to be closed');
+  assert.equal(relay.alive(), true, 'server must survive rate-limited clients');
+});
+
+test('limits concurrent connections per IP', async (t) => {
+  const relay = await startRelay({ MAX_CONNECTIONS_PER_IP: '1' });
+  t.after(() => relay.kill());
+
+  const first = await connect();
+  const second = await connect();
+  const closed = new Promise((resolve) => {
+    second.ws.on('close', () => resolve(true));
+    setTimeout(() => resolve(false), 2000);
+  });
+
+  const gotNotice = await waitFor(() =>
+    second.messages.some((m) => m[0] === 'NOTICE' && m[1].includes('too many connections'))
+  );
+  assert.equal(gotNotice, true, 'expected NOTICE on per-IP cap rejection');
+  assert.equal(await closed, true, 'expected per-IP rejected connection to be closed');
+  assert.equal(relay.alive(), true, 'server must survive per-IP rejections');
+  first.ws.close();
+});
+
+test('rate limits new connections per IP and recovers after the bucket refills', async (t) => {
+  const relay = await startRelay({ IP_CONNECT_RATE: '1', IP_CONNECT_BURST: '1' });
+  t.after(() => relay.kill());
+
+  // The readiness probe consumed the only token; keep retrying until the
+  // bucket refills and we are accepted (this consumes it again).
+  const first = await connectUntilWelcome();
+  const second = await connect(); // must be rate limited
+  const gotNotice = await waitFor(() =>
+    second.messages.some((m) => m[0] === 'NOTICE' && m[1].includes('connection rate limit'))
+  );
+  assert.equal(gotNotice, true, 'expected NOTICE on per-IP connection rate limit');
+  first.ws.close();
+
+  // After ~1s the bucket refills (rate 1/s) and a new connection is allowed.
+  await wait(1200);
+  const third = await connect();
+  const welcome = await waitFor(() => third.messages.some((m) => m[0] === 'NOTICE' && m[1].includes('welcome')));
+  assert.equal(welcome, true, 'expected connection allowed after bucket refill');
+  third.ws.close();
+});
+
+test('enforces the global connection cap across processes', async (t) => {
+  const dbPath = path.join(TMP_DIR, `global-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+  const relayA = await startRelay({ MAX_CONNECTIONS: '1' }, { port: 7901, dbPath });
+  const relayB = await startRelay({ MAX_CONNECTIONS: '1' }, { port: 7902, dbPath });
+  t.after(async () => {
+    await relayA.kill();
+    await relayB.kill();
+  });
+
+  const a = await connect(7901);
+  const b = await connect(7902);
+  const gotNotice = await waitFor(() =>
+    b.messages.some((m) => m[0] === 'NOTICE' && m[1].includes('max connections (global)'))
+  );
+  assert.equal(gotNotice, true, 'expected second process to reject when global cap is held');
+
+  // Free the slot from relayA; relayB should then accept.
+  a.ws.close();
+  const b2 = await connectUntilWelcome(7902);
+  assert.equal(relayB.alive(), true, 'second process must survive');
+  b2.ws.close();
+});
+
+test('enforces the per-IP concurrent cap across processes', async (t) => {
+  const dbPath = path.join(TMP_DIR, `perip-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+  const relayA = await startRelay({ MAX_CONNECTIONS: '100', MAX_CONNECTIONS_PER_IP: '1' }, { port: 7901, dbPath });
+  const relayB = await startRelay({ MAX_CONNECTIONS: '100', MAX_CONNECTIONS_PER_IP: '1' }, { port: 7902, dbPath });
+  t.after(async () => {
+    await relayA.kill();
+    await relayB.kill();
+  });
+
+  const a = await connect(7901);
+  const b = await connect(7902);
+  const gotNotice = await waitFor(() =>
+    b.messages.some((m) => m[0] === 'NOTICE' && m[1].includes('too many connections'))
+  );
+  assert.equal(gotNotice, true, 'expected second process to reject when per-IP cap is held');
+
+  // Free the per-IP slot from relayA; relayB should then accept.
+  a.ws.close();
+  const b2 = await connectUntilWelcome(7902);
+  assert.equal(relayB.alive(), true, 'second process must survive');
+  b2.ws.close();
+});
+
+test('shares the per-IP connection rate bucket across processes', async (t) => {
+  const dbPath = path.join(TMP_DIR, `iperate-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+  const relayA = await startRelay({ IP_CONNECT_RATE: '1', IP_CONNECT_BURST: '1' }, { port: 7901, dbPath });
+  const relayB = await startRelay({ IP_CONNECT_RATE: '1', IP_CONNECT_BURST: '1' }, { port: 7902, dbPath });
+  t.after(async () => {
+    await relayA.kill();
+    await relayB.kill();
+  });
+
+  // The readiness probes consumed the shared tokens; retry until the bucket
+  // refills and process A accepts us (consuming the token again).
+  const a = await connectUntilWelcome(7901);
+  const b = await connect(7902); // must be rate limited by the other process's bucket
+  const gotNotice = await waitFor(() =>
+    b.messages.some((m) => m[0] === 'NOTICE' && m[1].includes('connection rate limit'))
+  );
+  assert.equal(gotNotice, true, 'expected shared per-IP rate bucket to reject');
+  a.ws.close();
+
+  // After ~1s the shared bucket refills (rate 1/s) and a new connection works.
+  await wait(1200);
+  const c = await connectUntilWelcome(7902);
+  assert.equal(relayB.alive(), true, 'second process must survive');
+  c.ws.close();
 });
 
 test('CLOSE removes a subscription and unknown verbs get a NOTICE', async (t) => {

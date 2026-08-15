@@ -2,8 +2,9 @@ import { createHash } from 'crypto';
 import { schnorr } from '@noble/curves/secp256k1';
 import { NostrEvent } from './types';
 
-export function verifyEventId(event: NostrEvent): boolean {
-  const serialized = JSON.stringify([
+// NIP-01 event serialization: the event id is the sha256 of this JSON array.
+export function serializeEvent(event: NostrEvent): string {
+  return JSON.stringify([
     0,
     event.pubkey,
     event.created_at,
@@ -11,7 +12,10 @@ export function verifyEventId(event: NostrEvent): boolean {
     event.tags,
     event.content,
   ]);
-  const hash = createHash('sha256').update(serialized).digest('hex');
+}
+
+export function verifyEventId(event: NostrEvent, serialized?: string): boolean {
+  const hash = createHash('sha256').update(serialized ?? serializeEvent(event)).digest('hex');
   return hash === event.id;
 }
 

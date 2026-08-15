@@ -1,22 +1,53 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
-import { saveEvent, getEvents, eventExists } from './db';
-import { validateEvent, verifyEventId, verifySignature } from './verify';
+import { randomBytes } from 'crypto';
+import { saveEvent, getEvents, eventExists, acquireConnectionLease, renewConnectionLease, releaseConnectionLease, tryAcquireIpRate, pruneIpState, LeaseAcquireResult } from './db';
+import { validateEvent, verifyEventId, verifySignature, serializeEvent } from './verify';
+import { isTagFilterKey } from './filter';
 import { NostrEvent, Filter, Subscription } from './types';
 
-const MAX_SUBS_PER_CLIENT = parseInt(process.env.MAX_SUBS ?? '20');
-const MAX_FILTERS_PER_SUB = parseInt(process.env.MAX_FILTERS ?? '10');
-const MAX_EVENT_TAGS = parseInt(process.env.MAX_EVENT_TAGS ?? '2500');
-const MAX_FILTER_ARRAY = parseInt(process.env.MAX_FILTER_ARRAY ?? '100');
-const MAX_EVENT_SIZE = parseInt(process.env.MAX_EVENT_SIZE ?? '65536');
+// Parse a positive integer env var, falling back to a default on missing or
+// invalid values so a bad config can never silently disable a limit.
+function parsePositiveInt(name: string, fallback: number): number {
+  const value = parseInt(process.env[name] ?? '', 10);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+const MAX_SUBS_PER_CLIENT = parsePositiveInt('MAX_SUBS', 20);
+const MAX_FILTERS_PER_SUB = parsePositiveInt('MAX_FILTERS', 10);
+const MAX_EVENT_TAGS = parsePositiveInt('MAX_EVENT_TAGS', 2500);
+const MAX_FILTER_ARRAY = parsePositiveInt('MAX_FILTER_ARRAY', 100);
+const MAX_EVENT_SIZE = parsePositiveInt('MAX_EVENT_SIZE', 65536);
+const MAX_CONNECTIONS = parsePositiveInt('MAX_CONNECTIONS', 100);
+const RATE_LIMIT_RATE = parsePositiveInt('RATE_LIMIT_MESSAGES', 60);
+const RATE_LIMIT_BURST = parsePositiveInt('RATE_LIMIT_BURST', 100);
+const RATE_LIMIT_MAX_VIOLATIONS = 10;
+const MAX_CONNECTIONS_PER_IP = parsePositiveInt('MAX_CONNECTIONS_PER_IP', 10);
+const IP_CONNECT_RATE = parsePositiveInt('IP_CONNECT_RATE', 5);
+const IP_CONNECT_BURST = parsePositiveInt('IP_CONNECT_BURST', 10);
+
+// Connection leases: a row per accepted connection with an expiry, renewed
+// periodically. Expired rows (crashed processes) are purged on the next
+// acquire, so a hard-killed relay eventually frees its slots.
+const CONN_LEASE_TTL_MS = 60_000;
+const CONN_LEASE_HEARTBEAT_MS = 20_000;
+
+// How often to prune idle per-IP rate state from the database.
+const IP_STATE_PRUNE_INTERVAL_MS = 60_000;
+const IP_STATE_IDLE_MS = 5 * 60_000;
 
 interface Client {
   ws: WebSocket;
   subs: Map<string, Subscription>;
   ip: string;
+  tokens: number;
+  lastRefill: number;
+  violations: number;
 }
 
 const clients = new Set<Client>();
+const clientLeases = new Map<Client, string>();
+let lastIpStatePrune = 0;
 
 function send(ws: WebSocket, msg: unknown[]): void {
   if (ws.readyState === WebSocket.OPEN) {
@@ -24,15 +55,20 @@ function send(ws: WebSocket, msg: unknown[]): void {
   }
 }
 
+// NIP-01 allows ids and authors to be full 64-char hex values or prefixes.
+function matchesHexFilter(value: string, candidates: string[]): boolean {
+  return candidates.some((c) => value.startsWith(c));
+}
+
 function matchesFilter(event: NostrEvent, filter: Filter): boolean {
-  if (filter.ids?.length && !filter.ids.includes(event.id)) return false;
-  if (filter.authors?.length && !filter.authors.includes(event.pubkey)) return false;
+  if (filter.ids?.length && !matchesHexFilter(event.id, filter.ids)) return false;
+  if (filter.authors?.length && !matchesHexFilter(event.pubkey, filter.authors)) return false;
   if (filter.kinds?.length && !filter.kinds.includes(event.kind)) return false;
   if (filter.since != null && event.created_at < filter.since) return false;
   if (filter.until != null && event.created_at > filter.until) return false;
 
   for (const [key, vals] of Object.entries(filter)) {
-    if (!key.startsWith('#') || key.length !== 2) continue;
+    if (!isTagFilterKey(key)) continue;
     const tagName = key.slice(1);
     const values = vals as string[];
     const found = event.tags.some(t => t[0] === tagName && values.includes(t[1]));
@@ -65,7 +101,7 @@ function validateFilter(f: unknown): f is Filter {
       if (!isInt(value)) return false;
     } else if (key === 'limit') {
       if (!isInt(value) || value <= 0) return false;
-    } else if (key.startsWith('#') && key.length === 2) {
+    } else if (isTagFilterKey(key)) {
       // NIP-01 tag filters
       if (!isStringArray(value, MAX_FILTER_ARRAY)) return false;
     }
@@ -93,23 +129,27 @@ function handleEvent(client: Client, data: unknown[]): void {
   }
   const event = raw as NostrEvent;
 
-  if (JSON.stringify(event).length > MAX_EVENT_SIZE) {
+  // Cheap checks first: the serialized form is needed for both the size cap
+  // and the id hash, so compute it once here.
+  const serialized = serializeEvent(event);
+  if (serialized.length > MAX_EVENT_SIZE) {
     send(client.ws, ['OK', event.id, false, 'invalid: event too large']);
-    return;
-  }
-
-  if (!verifyEventId(event)) {
-    send(client.ws, ['OK', event.id, false, 'invalid: id does not match']);
-    return;
-  }
-
-  if (!verifySignature(event)) {
-    send(client.ws, ['OK', event.id, false, 'invalid: signature verification failed']);
     return;
   }
 
   if (event.tags.length > MAX_EVENT_TAGS) {
     send(client.ws, ['OK', event.id, false, 'invalid: too many tags']);
+    return;
+  }
+
+  if (!verifyEventId(event, serialized)) {
+    send(client.ws, ['OK', event.id, false, 'invalid: id does not match']);
+    return;
+  }
+
+  // Signature verification is the most expensive check; run it last.
+  if (!verifySignature(event)) {
+    send(client.ws, ['OK', event.id, false, 'invalid: signature verification failed']);
     return;
   }
 
@@ -170,7 +210,35 @@ function handleClose(client: Client, data: unknown[]): void {
   }
 }
 
+// Token bucket: refill by elapsed time, reject messages once the bucket is
+// empty, and close the connection after too many consecutive violations.
+function enforceRateLimit(client: Client): boolean {
+  const now = Date.now();
+  client.tokens = Math.min(
+    RATE_LIMIT_BURST,
+    client.tokens + ((now - client.lastRefill) / 1000) * RATE_LIMIT_RATE
+  );
+  client.lastRefill = now;
+
+  if (client.tokens >= 1) {
+    client.tokens -= 1;
+    client.violations = 0;
+    return true;
+  }
+
+  client.violations += 1;
+  if (client.violations >= RATE_LIMIT_MAX_VIOLATIONS) {
+    send(client.ws, ['NOTICE', 'error: rate limit exceeded, closing connection']);
+    client.ws.close();
+  } else {
+    send(client.ws, ['NOTICE', 'error: rate limit exceeded']);
+  }
+  return false;
+}
+
 function handleMessage(client: Client, raw: string): void {
+  if (!enforceRateLimit(client)) return;
+
   let data: unknown[];
   try {
     data = JSON.parse(raw);
@@ -200,13 +268,100 @@ function handleMessage(client: Client, raw: string): void {
   }
 }
 
+function cleanupClient(client: Client, token: string): void {
+  clients.delete(client);
+  clientLeases.delete(client);
+  try {
+    releaseConnectionLease(token);
+  } catch (err) {
+    console.error('[!] lease release error:', err);
+  }
+}
+
 export function createRelay(port: number): WebSocketServer {
   const wss = new WebSocketServer({ port, maxPayload: 1024 * 1024 });
 
+  // Keep leases for this process's connections alive and prune idle per-IP
+  // rate state. unref() so the timer never keeps the process alive by itself.
+  const heartbeat = setInterval(() => {
+    const now = Date.now();
+    if (now - lastIpStatePrune >= IP_STATE_PRUNE_INTERVAL_MS) {
+      lastIpStatePrune = now;
+      try {
+        pruneIpState(now - IP_STATE_IDLE_MS);
+      } catch (err) {
+        console.error('[!] ip state prune error:', err);
+      }
+    }
+    for (const [client, token] of clientLeases) {
+      if (client.ws.readyState === WebSocket.OPEN) {
+        try {
+          renewConnectionLease(token, CONN_LEASE_TTL_MS);
+        } catch (err) {
+          console.error('[!] lease renew error:', err);
+        }
+      }
+    }
+  }, CONN_LEASE_HEARTBEAT_MS);
+  heartbeat.unref();
+
   wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
     const ip = req.socket.remoteAddress ?? 'unknown';
-    const client: Client = { ws, subs: new Map(), ip };
+
+    // Fast local pre-filter before any DB work.
+    if (clients.size >= MAX_CONNECTIONS) {
+      send(ws, ['NOTICE', 'error: server at max connections, try again later']);
+      ws.close();
+      return;
+    }
+
+    // Cross-process per-IP rate bucket for connection attempts.
+    let rateOk = false;
+    try {
+      rateOk = tryAcquireIpRate(ip, IP_CONNECT_RATE, IP_CONNECT_BURST);
+    } catch (err) {
+      console.error('[!] ip rate error:', err);
+    }
+    if (!rateOk) {
+      send(ws, ['NOTICE', 'error: connection rate limit exceeded, try again later']);
+      ws.close();
+      return;
+    }
+
+    // Cross-process global and per-IP concurrent caps, one atomic lease step.
+    const leaseToken = randomBytes(16).toString('hex');
+    let lease: LeaseAcquireResult = 'max-connections';
+    try {
+      lease = acquireConnectionLease({
+        token: leaseToken,
+        pid: process.pid,
+        ip,
+        ttlMs: CONN_LEASE_TTL_MS,
+        maxConnections: MAX_CONNECTIONS,
+        maxConnectionsPerIp: MAX_CONNECTIONS_PER_IP,
+      });
+    } catch (err) {
+      console.error('[!] lease acquire error:', err);
+    }
+    if (lease !== 'ok') {
+      const message = lease === 'max-per-ip'
+        ? 'error: too many connections from your address'
+        : 'error: server at max connections (global), try again later';
+      send(ws, ['NOTICE', message]);
+      ws.close();
+      return;
+    }
+
+    const client: Client = {
+      ws,
+      subs: new Map(),
+      ip,
+      tokens: RATE_LIMIT_BURST,
+      lastRefill: Date.now(),
+      violations: 0,
+    };
     clients.add(client);
+    clientLeases.set(client, leaseToken);
     console.log(`[+] ${ip} connected (total: ${clients.size})`);
 
     ws.on('message', (buf) => {
@@ -214,12 +369,12 @@ export function createRelay(port: number): WebSocketServer {
     });
 
     ws.on('close', () => {
-      clients.delete(client);
+      cleanupClient(client, leaseToken);
       console.log(`[-] ${ip} disconnected (total: ${clients.size})`);
     });
 
     ws.on('error', (err) => {
-      clients.delete(client);
+      cleanupClient(client, leaseToken);
       console.error(`[!] ${ip} error:`, err.message);
     });
 

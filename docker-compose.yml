@@ -11,6 +11,12 @@ services:
       - MAX_SUBS=20
       - MAX_FILTERS=10
       - MAX_EVENT_TAGS=2500
+      - MAX_CONNECTIONS=100
+      - MAX_CONNECTIONS_PER_IP=10
+      - IP_CONNECT_RATE=5
+      - IP_CONNECT_BURST=10
+      - RATE_LIMIT_MESSAGES=60
+      - RATE_LIMIT_BURST=100
     restart: unless-stopped
 
 volumes:

@@ -26,6 +26,14 @@ All settings are environment variables:
 | `MAX_SUBS` | `20` | Max concurrent subscriptions per connection |
 | `MAX_FILTERS` | `10` | Max filters per REQ message |
 | `MAX_EVENT_TAGS` | `2500` | Max tags per event |
+| `MAX_FILTER_ARRAY` | `100` | Max values per filter array (`ids`, `authors`, `kinds`, `#tags`) |
+| `MAX_EVENT_SIZE` | `65536` | Max serialized event size in bytes |
+| `MAX_CONNECTIONS` | `100` | Global max concurrent connections across all relay processes sharing the same database; extra connections are rejected |
+| `MAX_CONNECTIONS_PER_IP` | `10` | Max concurrent connections from a single IP across all relay processes sharing the database |
+| `IP_CONNECT_RATE` | `5` | Max new connections per second from a single IP (token refill rate, shared across processes) |
+| `IP_CONNECT_BURST` | `10` | Max burst of new connections from a single IP before throttling starts (shared across processes) |
+| `RATE_LIMIT_MESSAGES` | `60` | Max messages per second per connection (token refill rate) |
+| `RATE_LIMIT_BURST` | `100` | Max burst of messages per connection before throttling starts |
 
 ## Running without Docker
 
@@ -97,8 +105,8 @@ npm start         # or restart your service (systemd, pm2, etc.)
 If you are using OPNsense HAProxy for TLS termination, configure your backend to forward to `<server-ip>:7777` with plain `ws://`. HAProxy handles `wss://` on port 443 and passes plain WebSocket traffic through to the relay.
 
 Key HAProxy backend settings for WebSocket:
-- `timeout tunnel 3600s` — keeps long-lived WebSocket connections alive
-- `timeout server 3600s` — matches tunnel timeout
+- `timeout tunnel 3600s` - keeps long-lived WebSocket connections alive
+- `timeout server 3600s` - matches tunnel timeout
 - `http-reuse safe`
 - HTTP/2 disabled
 
