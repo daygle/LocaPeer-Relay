@@ -188,7 +188,7 @@
     <div id="settings-view" class="hidden">
       <div id="settings"></div>
       <div class="actions">
-        <button id="save">Save settings</button>
+        <button id="save">Save Settings</button>
         <span id="toast" class="toast"></span>
       </div>
       <footer>Settings are stored in the relay database and override environment defaults. The admin account is created on first login and also lives in the database.</footer>
@@ -266,7 +266,7 @@ function showSetup() {
     `<div class="field"><label for="su-user">Username</label><input id="su-user" type="text" autocomplete="username"></div>
      <div class="field"><label for="su-pass">Password</label><input id="su-pass" type="password" autocomplete="new-password"></div>
      <div class="field"><label for="su-pass2">Confirm password</label><input id="su-pass2" type="password" autocomplete="new-password"></div>`,
-    'Create account',
+    'Create Account',
     async () => {
       const username = $('su-user').value.trim();
       const password = $('su-pass').value;
@@ -297,7 +297,7 @@ function showLogin(message) {
     'Enter the admin credentials created on first setup.',
     `<div class="field"><label for="li-user">Username</label><input id="li-user" type="text" autocomplete="username"></div>
      <div class="field"><label for="li-pass">Password</label><input id="li-pass" type="password" autocomplete="current-password"></div>`,
-    'Log in',
+    'Log In',
     async () => {
       setCreds($('li-user').value.trim(), $('li-pass').value);
       try {
@@ -547,7 +547,7 @@ async function loadSettings() {
       ${list.map((def) => {
         const type = def.kind === 'int' ? 'number' : (def.secret ? 'password' : 'text');
         const range = def.min != null ? ` min="${def.min}" max="${def.max}"` : '';
-        const toggle = def.secret ? `<button type="button" class="secondary" data-toggle="${def.key}">show</button>` : '';
+        const toggle = def.secret ? `<button type="button" class="secondary" data-toggle="${def.key}">Show</button>` : '';
         const help = def.help ? `<p class="help">${esc(def.help)}</p>` : '';
         const apply = def.applyNote ? `<p class="help">Applies after: <code>${esc(def.applyNote)}</code></p>` : '';
         return `
@@ -567,7 +567,7 @@ async function loadSettings() {
       const input = $('f-' + btn.dataset.toggle);
       const show = input.type === 'password';
       input.type = show ? 'text' : 'password';
-      btn.textContent = show ? 'hide' : 'show';
+      btn.textContent = show ? 'Hide' : 'Show';
     });
   }
 }
