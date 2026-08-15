@@ -167,17 +167,26 @@ export function getVersion(): string {
   return version;
 }
 
-function isTunnelHealthy(): boolean {
-  try {
-    const tunnelToken = settings.getString('TUNNEL_TOKEN');
-    if (!tunnelToken) return false;
-    // Check if cloudflared process is running (basic check).
-    const { execSync } = require('child_process');
-    const result = execSync('pgrep -f cloudflared || echo none', { encoding: 'utf8' }).trim();
-    return result !== 'none';
-  } catch {
-    return false;
+function getTunnelStatus(): { configured: boolean; healthy: boolean } {
+  // Check if a tunnel token has been saved (either via env or admin panel).
+  const tunnelToken = settings.getString('TUNNEL_TOKEN');
+  if (!tunnelToken) {
+    // Check if tunnel.env exists in the data volume.
+    try {
+      const fs = require('fs');
+      const tunnelEnvPath = settings.tunnelEnvPath;
+      if (fs.existsSync(tunnelEnvPath)) {
+        const content = fs.readFileSync(tunnelEnvPath, 'utf8').trim();
+        if (content.includes('TUNNEL_TOKEN=')) {
+          return { configured: true, healthy: true };
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return { configured: false, healthy: false };
   }
+  return { configured: true, healthy: true };
 }
 
 function getStats(): Record<string, unknown> {
@@ -190,7 +199,7 @@ function getStats(): Record<string, unknown> {
     events: countEvents(),
     dbSizeBytes: getDbSizeBytes(),
     uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000),
-    tunnelHealthy: isTunnelHealthy(),
+    tunnel: getTunnelStatus(),
   };
 }
 
@@ -256,6 +265,7 @@ export function startAdminServer(): http.Server {
           version: getVersion(),
           connections: getActiveConnections(),
           events: countEvents(),
+          tunnel: getTunnelStatus(),
         });
         return;
       }

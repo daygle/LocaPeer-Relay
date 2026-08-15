@@ -330,14 +330,19 @@ function fmtUptime(s) {
 function renderStats(s) {
   statsStartedAt = s.startedAt || null;
   $('version').textContent = 'v' + esc(s.version);
-  const tunnelStatus = s.tunnelHealthy ? '<span style="color:var(--accent-2)">&#9679;</span> Connected' : '<span style="color:var(--muted)">&#9679;</span> Not running';
+  let tunnelHtml;
+  if (s.tunnel && s.tunnel.configured) {
+    tunnelHtml = '<span style="color:var(--accent-2)">&#9679;</span> Configured';
+  } else {
+    tunnelHtml = '<span style="color:var(--muted)">&#9679;</span> Not configured';
+  }
   $('stats').innerHTML = [
     ['Active connections', s.connections],
     ['Peak connections', s.maxConnectionsSeen],
     ['Events stored', s.events],
     ['Database size', fmtBytes(s.dbSizeBytes)],
     ['Uptime', fmtUptime(s.uptimeSeconds)],
-    ['Tunnel', tunnelStatus],
+    ['Tunnel', tunnelHtml],
   ].map(([k, v], i) =>
     '<div class="card"><div class="k">' + k + '</div><div class="v"' + (i === 4 ? ' id="stat-uptime"' : '') + '>' + v + '</div></div>'
   ).join('');
