@@ -89,11 +89,15 @@ function loadFavicon(): string {
 }
 
 function parseBasicAuth(req: http.IncomingMessage): { username: string; password: string } | null {
-  const match = /^Basic\s+(.+)$/.exec(req.headers.authorization ?? '');
-  if (!match) return null;
+  // Parse the header manually (no regex) so an attacker-controlled
+  // Authorization value cannot trigger super-linear regex backtracking.
+  const header = req.headers.authorization ?? '';
+  if (!header.startsWith('Basic ')) return null;
+  const encoded = header.slice(6).trim();
+  if (!encoded) return null;
   let decoded = '';
   try {
-    decoded = Buffer.from(match[1], 'base64').toString('utf8');
+    decoded = Buffer.from(encoded, 'base64').toString('utf8');
   } catch {
     return null;
   }
@@ -399,7 +403,11 @@ export function startAdminServer(): http.Server {
 
       sendJson(res, 404, { error: 'Not found' });
     } catch (err) {
-      sendJson(res, 400, { error: err instanceof Error ? err.message : 'Bad request' });
+      // Never echo exception text back to the client: error messages can
+      // carry attacker-influenced data (and would be rendered by the panel).
+      // Log the detail server-side and reply with a generic message.
+      error('[admin] request failed:', err);
+      sendJson(res, 400, { error: 'Bad request' });
     }
   });
 
