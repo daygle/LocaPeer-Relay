@@ -420,7 +420,12 @@ test('enforces the global connection cap across processes', async (t) => {
     await relayB.kill();
   });
 
-  const a = await connect(7901);
+  // Wait until relayA actually holds the single global slot before probing
+  // relayB. A bare connect() only resolves on the socket opening, so under load
+  // `a` could be turned away (a lingering readiness-probe lease still occupying
+  // the slot, or the shared per-IP connect-rate bucket briefly empty) and never
+  // hold the slot at all, leaving it free for relayB to accept.
+  const a = await connectUntilWelcome(7901);
   const b = await connect(7902);
   const gotNotice = await waitFor(() =>
     b.messages.some((m) => m[0] === 'NOTICE' && m[1].includes('max connections (global)'))
@@ -443,7 +448,10 @@ test('enforces the per-IP concurrent cap across processes', async (t) => {
     await relayB.kill();
   });
 
-  const a = await connect(7901);
+  // As above, make sure relayA actually holds the single per-IP slot before
+  // probing relayB, so a connection turned away under load can't leave the slot
+  // free and let relayB accept `b`.
+  const a = await connectUntilWelcome(7901);
   const b = await connect(7902);
   const gotNotice = await waitFor(() =>
     b.messages.some((m) => m[0] === 'NOTICE' && m[1].includes('too many connections'))
