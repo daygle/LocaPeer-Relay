@@ -12,12 +12,12 @@
   "dependencies": {
     "@noble/curves": "^2.4.0",
     "better-sqlite3": "13.0.3",
-    "ws": "^8.16.0"
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.6.3",
-    "@types/ws": "^8.5.10",
+    "@types/ws": "^8.18.2",
     "ts-node": "^10.9.2",
     "typescript": "^7.0.2"
   }
