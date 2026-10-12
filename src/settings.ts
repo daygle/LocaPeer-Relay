@@ -121,12 +121,15 @@ export const SETTING_DEFS: SettingDef[] = [
   {
     key: 'MAX_EVENT_SIZE',
     kind: 'int',
-    default: 65536,
+    // LocaPeer sends images (up to 150 KB JPEG) and files (up to 100 KB) inline
+    // in NIP-44 encrypted DMs; after Base64, NIP-44 padding and Base64 again a
+    // single image event serializes to ~310 KB, so 64 KB would reject them.
+    default: 524288,
     min: 1024,
     max: 1048576,
     group: 'Events & Queries',
     label: 'Max Event Size (Bytes)',
-    help: 'Largest serialized event that will be accepted.',
+    help: 'Largest serialized event that will be accepted. LocaPeer image and file messages need ~310 KB; keep this at 512 KB or more.',
   },
   {
     key: 'WS_PING_INTERVAL_MS',

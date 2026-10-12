@@ -1,6 +1,6 @@
 # LocaPeer Relay
 
-A self-hostable [Nostr](https://nostr.com) relay built for [LocaPeer](https://github.com/daygle/LocaPeer). Implements [NIP-01](https://github.com/nostr-protocol/nips/blob/master/01.md) and stores events in a local SQLite database.
+A self-hostable [Nostr](https://nostr.com) relay built for [LocaPeer](https://github.com/daygle/LocaPeer). Implements [NIP-01](https://github.com/nostr-protocol/nips/blob/master/01.md), [NIP-09](https://github.com/nostr-protocol/nips/blob/master/09.md) event deletion and [NIP-11](https://github.com/nostr-protocol/nips/blob/master/11.md) relay information, and stores events in a local SQLite database.
 
 ## Quick start with Docker (recommended)
 
@@ -27,7 +27,7 @@ All settings are environment variables:
 | `MAX_FILTERS` | `10` | Max filters per REQ message |
 | `MAX_EVENT_TAGS` | `2500` | Max tags per event |
 | `MAX_FILTER_ARRAY` | `100` | Max values per filter array (`ids`, `authors`, `kinds`, `#tags`) |
-| `MAX_EVENT_SIZE` | `65536` | Max serialized event size in bytes |
+| `MAX_EVENT_SIZE` | `524288` | Max serialized event size in bytes. LocaPeer sends images and files inline in encrypted DMs (~310 KB per event), so keep this at 512 KB or more |
 | `MAX_CONNECTIONS` | `100` | Global max concurrent connections across all relay processes sharing the same database; extra connections are rejected |
 | `MAX_CONNECTIONS_PER_IP` | `10` | Max concurrent connections from a single IP across all relay processes sharing the database |
 | `IP_CONNECT_RATE` | `5` | Max new connections per second from a single IP (token refill rate, shared across processes) |

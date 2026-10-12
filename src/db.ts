@@ -113,7 +113,9 @@ export function saveEvent(event: NostrEvent): boolean {
   return storeEvent(event) as boolean;
 }
 
-const MAX_LIMIT = 500;
+// LocaPeer's heartbeat catch-up asks for up to 1000 events in one REQ; a
+// lower cap would silently drop the oldest part of an offline gap.
+export const MAX_QUERY_LIMIT = 1000;
 
 // NIP-01 allows ids and authors to be full 64-char hex values or prefixes.
 // Full-length values use an exact IN lookup (index-friendly); shorter values
@@ -139,7 +141,7 @@ export function getEvents(filters: Filter[]): NostrEvent[] {
   const results = new Map<string, NostrEvent>();
 
   for (const filter of filters) {
-    const limit = Math.min(filter.limit ?? MAX_LIMIT, MAX_LIMIT);
+    const limit = Math.min(filter.limit ?? MAX_QUERY_LIMIT, MAX_QUERY_LIMIT);
     const conditions: string[] = [];
     // Params for the JOIN clauses and the WHERE clause are collected
     // separately because JOINs appear before WHERE in the SQL text, and
@@ -196,7 +198,42 @@ export function getEvents(filters: Filter[]): NostrEvent[] {
 
   return [...results.values()]
     .sort((a, b) => b.created_at - a.created_at)
-    .slice(0, MAX_LIMIT);
+    .slice(0, MAX_QUERY_LIMIT);
+}
+
+// ---------------------------------------------------------------------------
+// NIP-09 event deletion
+//
+// A kind-5 event deletes the events its "e" tags reference, but only those
+// signed by the same pubkey. The kind-5 event itself is kept (LocaPeer
+// replays deletions to devices that were offline when they were sent), and a
+// deleted event re-published later is refused.
+// ---------------------------------------------------------------------------
+
+export const DELETION_KIND = 5;
+
+const deleteReferencedEvent = db.prepare(
+  `DELETE FROM events WHERE id = ? AND pubkey = ? AND kind != ${DELETION_KIND}`
+);
+const deletionExists = db.prepare(`
+  SELECT 1 FROM tags t JOIN events e ON e.id = t.event_id
+  WHERE t.name = 'e' AND t.value = ? AND e.kind = ${DELETION_KIND} AND e.pubkey = ?
+  LIMIT 1
+`);
+
+export const applyDeletion = db.transaction((event: NostrEvent): number => {
+  let deleted = 0;
+  for (const tag of event.tags) {
+    if (tag[0] === 'e' && typeof tag[1] === 'string') {
+      deleted += deleteReferencedEvent.run(tag[1], event.pubkey).changes;
+    }
+  }
+  return deleted;
+}) as (event: NostrEvent) => number;
+
+export function isDeleted(event: NostrEvent): boolean {
+  if (event.kind === DELETION_KIND) return false;
+  return deletionExists.get(event.id, event.pubkey) != null;
 }
 
 export function eventExists(id: string): boolean {
