@@ -3,12 +3,15 @@ import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
 import { randomBytes } from 'crypto';
-import { saveEvent, getEvents, eventExists, acquireConnectionLease, renewConnectionLease, releaseConnectionLease, tryAcquireIpRate, pruneIpState, pruneOldEvents, LeaseAcquireResult } from './db';
+import { saveEvent, getEvents, eventExists, applyDeletion, isDeleted, DELETION_KIND, MAX_QUERY_LIMIT, acquireConnectionLease, renewConnectionLease, releaseConnectionLease, tryAcquireIpRate, pruneIpState, pruneOldEvents, LeaseAcquireResult } from './db';
 import { validateEvent, verifyEventId, verifySignature, serializeEvent } from './verify';
 import { isTagFilterKey } from './filter';
 import { NostrEvent, Filter, Subscription } from './types';
 import { settings } from './settings';
 import { log, error } from './log';
+
+// Largest WebSocket frame accepted; also the ceiling for MAX_EVENT_SIZE.
+const WS_MAX_PAYLOAD = 1024 * 1024;
 
 // Maximum consecutive rate-limit violations before a connection is closed.
 const RATE_LIMIT_MAX_VIOLATIONS = 10;
@@ -124,7 +127,12 @@ function broadcastEvent(event: NostrEvent): void {
 function handleEvent(client: Client, data: unknown[]): void {
   const raw = data[1];
   if (!validateEvent(raw)) {
-    send(client.ws, ['NOTICE', 'invalid: event structure invalid']);
+    // Answer with OK when the id is readable so the publisher can settle the
+    // event (NIP-01); otherwise there is nothing to correlate a reply with.
+    const id = eventIdOf(raw);
+    send(client.ws, id
+      ? ['OK', id, false, 'invalid: event structure invalid']
+      : ['NOTICE', 'invalid: event structure invalid']);
     return;
   }
   const event = raw as NostrEvent;
@@ -132,7 +140,7 @@ function handleEvent(client: Client, data: unknown[]): void {
   // Cheap checks first: the serialized form is needed for both the size cap
   // and the id hash, so compute it once here.
   const serialized = serializeEvent(event);
-  if (serialized.length > settings.getInt('MAX_EVENT_SIZE')) {
+  if (Buffer.byteLength(serialized, 'utf8') > settings.getInt('MAX_EVENT_SIZE')) {
     send(client.ws, ['OK', event.id, false, 'invalid: event too large']);
     return;
   }
@@ -158,10 +166,16 @@ function handleEvent(client: Client, data: unknown[]): void {
     return;
   }
 
+  if (isDeleted(event)) {
+    send(client.ws, ['OK', event.id, false, 'blocked: event was deleted by its author']);
+    return;
+  }
+
   const saved = saveEvent(event);
   send(client.ws, ['OK', event.id, saved, saved ? '' : 'error: could not save event']);
 
   if (saved) {
+    if (event.kind === DELETION_KIND) applyDeletion(event);
     broadcastEvent(event);
     relayEvents.emit('stats');
   }
@@ -213,9 +227,19 @@ function handleClose(client: Client, data: unknown[]): void {
   }
 }
 
+// A 64-char hex event id from an EVENT payload, if it has one.
+function eventIdOf(raw: unknown): string | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const id = (raw as Record<string, unknown>).id;
+  return typeof id === 'string' && /^[0-9a-f]{64}$/.test(id) ? id : null;
+}
+
 // Token bucket: refill by elapsed time, reject messages once the bucket is
 // empty, and close the connection after too many consecutive violations.
-function enforceRateLimit(client: Client): boolean {
+// A throttled EVENT is answered with OK false "rate-limited:" (NIP-01) so the
+// publisher keeps it queued and retries, instead of waiting for an OK that
+// never comes and assuming the event was delivered.
+function enforceRateLimit(client: Client, data: unknown): boolean {
   const now = Date.now();
   client.tokens = Math.min(
     settings.getInt('RATE_LIMIT_BURST'),
@@ -230,6 +254,10 @@ function enforceRateLimit(client: Client): boolean {
   }
 
   client.violations += 1;
+  const eventId = Array.isArray(data) && data[0] === 'EVENT' ? eventIdOf(data[1]) : null;
+  if (eventId) {
+    send(client.ws, ['OK', eventId, false, 'rate-limited: slow down']);
+  }
   if (client.violations >= RATE_LIMIT_MAX_VIOLATIONS) {
     send(client.ws, ['NOTICE', 'error: rate limit exceeded, closing connection']);
     client.ws.close();
@@ -240,15 +268,18 @@ function enforceRateLimit(client: Client): boolean {
 }
 
 function handleMessage(client: Client, raw: string): void {
-  if (!enforceRateLimit(client)) return;
-
+  // Parse before rate limiting so a throttled EVENT can be answered with OK.
+  // ws already caps frames at maxPayload, which bounds the parse cost.
   let data: unknown[];
   try {
     data = JSON.parse(raw);
   } catch {
+    if (!enforceRateLimit(client, null)) return;
     send(client.ws, ['NOTICE', 'error: failed to parse message']);
     return;
   }
+
+  if (!enforceRateLimit(client, data)) return;
 
   if (!Array.isArray(data) || data.length < 2) {
     send(client.ws, ['NOTICE', 'error: message must be a non-empty JSON array']);
@@ -288,9 +319,20 @@ function buildNip11(): object {
     name: settings.getString('RELAY_NAME') || 'LocaPeer Relay',
     description: settings.getString('RELAY_DESCRIPTION') || 'A self-hosted Nostr relay.',
     contact: settings.getString('RELAY_CONTACT') || undefined,
-    supported_nips: [1, 2, 4, 11],
+    supported_nips: [1, 9, 11],
     software: 'locapeer-relay',
     version: require('../package.json').version || 'unknown',
+    limitation: {
+      max_message_length: WS_MAX_PAYLOAD,
+      max_subscriptions: settings.getInt('MAX_SUBS'),
+      max_filters: settings.getInt('MAX_FILTERS'),
+      max_limit: MAX_QUERY_LIMIT,
+      max_subid_length: 64,
+      max_event_tags: settings.getInt('MAX_EVENT_TAGS'),
+      max_content_length: settings.getInt('MAX_EVENT_SIZE'),
+      auth_required: false,
+      payment_required: false,
+    },
   };
 }
 
@@ -298,7 +340,7 @@ export function createRelay(port: number): http.Server {
   // Create an HTTP server so we can handle NIP-11 requests before the
   // WebSocket upgrade. ws attaches to the 'upgrade' event.
   const httpServer = http.createServer();
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD });
 
   // Keep leases for this process's connections alive, prune idle per-IP rate
   // state, and pick up settings changes made in another process. unref() so

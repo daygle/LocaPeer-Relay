@@ -205,7 +205,7 @@ test('rejects an oversized event (OK false: event too large)', async (t) => {
   t.after(() => relay.kill());
 
   const client = await connect();
-  const event = makeEvent({ content: 'x'.repeat(100000) });
+  const event = makeEvent({ content: 'x'.repeat(600000) });
   client.ws.send(JSON.stringify(['EVENT', event]));
   const ok = await waitFor(() => client.messages.some((m) => m[0] === 'OK' && m[1] === event.id));
   const msg = client.messages.find((m) => m[0] === 'OK' && m[1] === event.id);
@@ -321,6 +321,119 @@ test('matches NIP-01 id prefix filters', async (t) => {
   );
   assert.equal(gotEvent, true, 'expected event matching id prefix');
   client.ws.close();
+});
+
+// ---------------------------------------------------------------------------
+// LocaPeer client compatibility
+// ---------------------------------------------------------------------------
+
+test('accepts a LocaPeer inline-image sized event (~320 KB) by default', async (t) => {
+  const relay = await startRelay();
+  t.after(() => relay.kill());
+
+  const client = await connect();
+  // A 150 KB JPEG, Base64'd, NIP-44 padded and Base64'd again is ~306 KB.
+  const event = makeEvent({ kind: 44, content: 'A'.repeat(320000), tags: [['p', 'b'.repeat(64)]] });
+  client.ws.send(JSON.stringify(['EVENT', event]));
+  const ok = await waitFor(() => client.messages.some((m) => m[0] === 'OK' && m[1] === event.id));
+  const msg = client.messages.find((m) => m[0] === 'OK' && m[1] === event.id);
+  assert.equal(ok, true, 'expected an OK response');
+  assert.equal(msg[2], true, `expected acceptance, got: ${msg[3]}`);
+  client.ws.close();
+});
+
+test('answers a rate-limited EVENT with OK false "rate-limited:"', async (t) => {
+  const relay = await startRelay({ RATE_LIMIT_MESSAGES: '1', RATE_LIMIT_BURST: '2' });
+  t.after(() => relay.kill());
+
+  const client = await connect();
+  const events = Array.from({ length: 4 }, (_, i) => makeEvent({ content: `burst ${i}` }));
+  for (const e of events) client.ws.send(JSON.stringify(['EVENT', e]));
+  const got = await waitFor(() => events.every((e) => client.messages.some((m) => m[0] === 'OK' && m[1] === e.id)));
+  assert.equal(got, true, 'expected an OK for every EVENT, throttled or not');
+  const limited = client.messages.filter((m) => m[0] === 'OK' && m[2] === false && /^rate-limited:/.test(m[3]));
+  assert.ok(limited.length >= 1, 'expected at least one rate-limited OK');
+  client.ws.close();
+});
+
+test('answers a malformed EVENT with a readable id with OK false "invalid:"', async (t) => {
+  const relay = await startRelay();
+  t.after(() => relay.kill());
+
+  const client = await connect();
+  const id = 'c'.repeat(64);
+  client.ws.send(JSON.stringify(['EVENT', { id, pubkey: 'y' }]));
+  const got = await waitFor(() => client.messages.some((m) => m[0] === 'OK' && m[1] === id && m[2] === false && /^invalid:/.test(m[3])));
+  assert.equal(got, true, 'expected OK false invalid');
+  client.ws.close();
+});
+
+test('NIP-09: a kind-5 event deletes the author\'s referenced events only', async (t) => {
+  const relay = await startRelay();
+  t.after(() => relay.kill());
+
+  const client = await connect();
+  const author = randomBytes(32);
+  const other = randomBytes(32);
+  const target = makeEvent({ kind: 44, content: 'secret', priv: author });
+  const foreign = makeEvent({ kind: 44, content: 'not yours', priv: other });
+  for (const e of [target, foreign]) {
+    client.ws.send(JSON.stringify(['EVENT', e]));
+    await waitFor(() => client.messages.some((m) => m[0] === 'OK' && m[1] === e.id && m[2] === true));
+  }
+
+  const peer = 'd'.repeat(64);
+  const deletion = makeEvent({
+    kind: 5,
+    content: 'Deleting message',
+    tags: [['e', target.id], ['e', foreign.id], ['p', peer]],
+    priv: author,
+  });
+  client.ws.send(JSON.stringify(['EVENT', deletion]));
+  await waitFor(() => client.messages.some((m) => m[0] === 'OK' && m[1] === deletion.id && m[2] === true));
+
+  client.ws.send(JSON.stringify(['REQ', 'del', { ids: [target.id, foreign.id, deletion.id] }]));
+  await waitFor(() => client.messages.some((m) => m[0] === 'EOSE' && m[1] === 'del'));
+  const ids = client.messages.filter((m) => m[0] === 'EVENT' && m[1] === 'del').map((m) => m[2].id);
+  assert.ok(!ids.includes(target.id), 'author\'s event must be deleted');
+  assert.ok(ids.includes(foreign.id), 'another author\'s event must survive');
+  assert.ok(ids.includes(deletion.id), 'the deletion event itself is kept for offline peers');
+
+  // Re-publishing the deleted event is refused.
+  client.ws.send(JSON.stringify(['EVENT', target]));
+  const blocked = await waitFor(() =>
+    client.messages.some((m) => m[0] === 'OK' && m[1] === target.id && m[2] === false && /^blocked:/.test(m[3]))
+  );
+  assert.equal(blocked, true, 'expected re-published deleted event to be blocked');
+  client.ws.close();
+});
+
+test('honours a REQ limit of 1000 (LocaPeer heartbeat catch-up)', async (t) => {
+  const relay = await startRelay({ RATE_LIMIT_MESSAGES: '100000', RATE_LIMIT_BURST: '100000' });
+  t.after(() => relay.kill());
+
+  const client = await connect();
+  const key = randomBytes(32);
+  const events = Array.from({ length: 600 }, (_, i) => makeEvent({ kind: 1040, content: `hb ${i}`, priv: key }));
+  for (const e of events) client.ws.send(JSON.stringify(['EVENT', e]));
+  await waitFor(() => client.messages.filter((m) => m[0] === 'OK').length >= events.length, 15000);
+
+  client.ws.send(JSON.stringify(['REQ', 'hb', { kinds: [1040], authors: [events[0].pubkey], limit: 1000 }]));
+  await waitFor(() => client.messages.some((m) => m[0] === 'EOSE' && m[1] === 'hb'), 10000);
+  const got = client.messages.filter((m) => m[0] === 'EVENT' && m[1] === 'hb').length;
+  assert.equal(got, 600, 'expected all 600 events, not a 500 cap');
+  client.ws.close();
+});
+
+test('NIP-11 advertises NIP-09 and the event size limit', async (t) => {
+  const relay = await startRelay();
+  t.after(() => relay.kill());
+
+  const res = await fetch(`http://127.0.0.1:${PORT}/`, { headers: { Accept: 'application/nostr+json' } });
+  const info = await res.json();
+  assert.ok(info.supported_nips.includes(9));
+  assert.equal(info.limitation.max_content_length, 524288);
+  assert.equal(info.limitation.max_limit, 1000);
 });
 
 // ---------------------------------------------------------------------------
