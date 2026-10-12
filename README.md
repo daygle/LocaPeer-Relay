@@ -35,6 +35,11 @@ All settings are environment variables:
 | `TRUST_CF_CONNECTING_IP` | `1` | Use the real client address from Cloudflare's `CF-Connecting-IP` header for the per-IP limits. Only honoured when the direct peer is a loopback or private address (e.g. the `cloudflared` container), so internet clients can't spoof it. Set to `0` to always use the socket address |
 | `RATE_LIMIT_MESSAGES` | `60` | Max messages per second per connection (token refill rate) |
 | `RATE_LIMIT_BURST` | `100` | Max burst of messages per connection before throttling starts |
+| `AUTOBAN_ENABLED` | `1` | Automatically ban misbehaving IPs (see [Auto-ban](#auto-ban)); `0` disables |
+| `AUTOBAN_STRIKES` | `20` | Strikes within the window that trigger a ban |
+| `AUTOBAN_WINDOW_SECONDS` | `300` | Window in which strikes add up |
+| `AUTOBAN_DURATION_MINUTES` | `60` | First ban length; each repeat within 7 days doubles it, up to 7 days |
+| `BANLIST_TOKEN` | *(empty)* | If set, `/api/banlist.txt` requires `?token=<value>` |
 | `WS_PING_INTERVAL_MS` | `30000` | How often the relay sends WebSocket ping frames; clients that do not answer are disconnected. Keeps idle connections alive through intermediaries (e.g. Cloudflare) that drop silent connections |
 | `ADMIN_PORT` | `8080` | Admin panel HTTP port (internal/LAN access only) |
 | `ADMIN_HOST` | `0.0.0.0` | Address the admin panel binds to |
@@ -51,6 +56,43 @@ All settings are environment variables:
 > instead of the environment; see the [Admin panel](#admin-panel) section.
 > The environment value seeds the initial default, and the database overrides
 > it once a value is edited in the panel.
+
+## Auto-ban
+
+The relay bans IP addresses that keep misbehaving. Each offence adds strikes;
+`AUTOBAN_STRIKES` strikes within `AUTOBAN_WINDOW_SECONDS` bans the address:
+
+| Offence | Strikes |
+|---|---|
+| Invalid event (bad structure, id mismatch, bad signature) | 1 |
+| Malformed message (unparseable JSON, unknown verb, malformed REQ) | 1 |
+| New connection over the per-IP connect rate | 1 |
+| Connection closed for message flooding | 5 |
+
+Hitting the per-IP connection cap does not count, since several phones on a
+shared address (e.g. mobile CGNAT) can hit it innocently. A legitimate
+LocaPeer client never sends invalid or malformed messages.
+
+- Banned addresses are refused with `403 Forbidden` before the WebSocket
+  handshake, and their open connections are dropped.
+- A first ban lasts `AUTOBAN_DURATION_MINUTES`; a repeat within 7 days doubles
+  it, up to 7 days. Bans are stored in the database, so they survive restarts
+  and apply across relay processes.
+- Loopback and private addresses are never banned. Behind the Cloudflare
+  Tunnel the client address comes from `CF-Connecting-IP` (see
+  `TRUST_CF_CONNECTING_IP`); if that is off, every client shares the
+  `cloudflared` address, and banning it would cut everyone off.
+- The admin panel's **Bans** tab lists active bans and can unban an address.
+
+### Firewall block list
+
+Active bans are served as plain text, one IP per line, at
+`http://<host>:<ADMIN_PORT>/api/banlist.txt` (add `?token=...` if
+`BANLIST_TOKEN` is set). In OPNsense, add a **URL Table (IPs)** alias under
+**Firewall → Aliases** with that URL and a refresh interval, then block it on
+WAN. Traffic arriving through the Cloudflare Tunnel never reaches the firewall
+directly, so this only blocks traffic that reaches your network without the
+tunnel; the relay itself refuses banned addresses either way.
 
 ## Admin panel
 

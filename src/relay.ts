@@ -7,6 +7,7 @@ import { saveEvent, getEvents, eventExists, applyDeletion, isDeleted, DELETION_K
 import { validateEvent, verifyEventId, verifySignature, serializeEvent } from './verify';
 import { isTagFilterKey } from './filter';
 import { getClientIp } from './clientip';
+import { strike, isBanned, STRIKE } from './bans';
 import { NostrEvent, Filter, Subscription } from './types';
 import { settings } from './settings';
 import { log, error } from './log';
@@ -41,6 +42,9 @@ interface Client {
   // False between a ping and the client's pong; the keepalive loop terminates
   // clients that fail to answer.
   alive: boolean;
+  // Set once the connection was closed for flooding, so frames still in
+  // flight don't add more strikes for the same offence.
+  floodClosed: boolean;
 }
 
 const clients = new Set<Client>();
@@ -51,6 +55,25 @@ let maxConnectionsSeen = 0;
 // Emitted whenever live stats change (connection open/close, event stored)
 // so the admin panel can push instant updates over Server-Sent Events.
 export const relayEvents = new EventEmitter();
+
+// Record an offence against the client's IP; if that bans it, drop every
+// open connection from the IP.
+function penalize(client: Client, reason: string, weight: number): void {
+  if (strike(client.ip, reason, weight)) dropIp(client.ip);
+}
+
+function dropIp(ip: string): void {
+  relayEvents.emit('stats');
+  for (const c of clients) {
+    if (c.ip !== ip) continue;
+    send(c.ws, ['NOTICE', 'blocked: your address has been banned']);
+    try {
+      c.ws.terminate();
+    } catch {
+      // best-effort
+    }
+  }
+}
 
 function send(ws: WebSocket, msg: unknown[]): void {
   if (ws.readyState === WebSocket.OPEN) {
@@ -134,6 +157,7 @@ function handleEvent(client: Client, data: unknown[]): void {
     send(client.ws, id
       ? ['OK', id, false, 'invalid: event structure invalid']
       : ['NOTICE', 'invalid: event structure invalid']);
+    penalize(client, 'invalid events', STRIKE.invalidEvent);
     return;
   }
   const event = raw as NostrEvent;
@@ -153,12 +177,14 @@ function handleEvent(client: Client, data: unknown[]): void {
 
   if (!verifyEventId(event, serialized)) {
     send(client.ws, ['OK', event.id, false, 'invalid: id does not match']);
+    penalize(client, 'invalid events', STRIKE.invalidEvent);
     return;
   }
 
   // Signature verification is the most expensive check; run it last.
   if (!verifySignature(event)) {
     send(client.ws, ['OK', event.id, false, 'invalid: signature verification failed']);
+    penalize(client, 'invalid events', STRIKE.invalidEvent);
     return;
   }
 
@@ -186,6 +212,7 @@ function handleReq(client: Client, data: unknown[]): void {
   const subId = data[1];
   if (typeof subId !== 'string' || subId.length > 64) {
     send(client.ws, ['NOTICE', 'invalid: subscription id must be a string <= 64 chars']);
+    penalize(client, 'malformed messages', STRIKE.malformedMessage);
     return;
   }
 
@@ -199,6 +226,7 @@ function handleReq(client: Client, data: unknown[]): void {
   const maxFilters = settings.getInt('MAX_FILTERS');
   if (!rawFilters.length || rawFilters.length > maxFilters) {
     send(client.ws, ['NOTICE', 'invalid: expected 1 to ' + maxFilters + ' filters']);
+    penalize(client, 'malformed messages', STRIKE.malformedMessage);
     return;
   }
 
@@ -206,6 +234,7 @@ function handleReq(client: Client, data: unknown[]): void {
   for (const raw of rawFilters) {
     if (!validateFilter(raw)) {
       send(client.ws, ['NOTICE', 'invalid: malformed filter']);
+      penalize(client, 'malformed messages', STRIKE.malformedMessage);
       return;
     }
     filters.push(raw);
@@ -262,6 +291,10 @@ function enforceRateLimit(client: Client, data: unknown): boolean {
   if (client.violations >= RATE_LIMIT_MAX_VIOLATIONS) {
     send(client.ws, ['NOTICE', 'error: rate limit exceeded, closing connection']);
     client.ws.close();
+    if (!client.floodClosed) {
+      client.floodClosed = true;
+      penalize(client, 'message flooding', STRIKE.floodClosed);
+    }
   } else {
     send(client.ws, ['NOTICE', 'error: rate limit exceeded']);
   }
@@ -277,6 +310,7 @@ function handleMessage(client: Client, raw: string): void {
   } catch {
     if (!enforceRateLimit(client, null)) return;
     send(client.ws, ['NOTICE', 'error: failed to parse message']);
+    penalize(client, 'malformed messages', STRIKE.malformedMessage);
     return;
   }
 
@@ -284,6 +318,7 @@ function handleMessage(client: Client, raw: string): void {
 
   if (!Array.isArray(data) || data.length < 2) {
     send(client.ws, ['NOTICE', 'error: message must be a non-empty JSON array']);
+    penalize(client, 'malformed messages', STRIKE.malformedMessage);
     return;
   }
 
@@ -295,6 +330,7 @@ function handleMessage(client: Client, raw: string): void {
       case 'CLOSE': return handleClose(client, data);
       default:
         send(client.ws, ['NOTICE', `error: unknown message type "${verb}"`]);
+        penalize(client, 'malformed messages', STRIKE.malformedMessage);
     }
   } catch (err) {
     // Never let a single bad message take down the process.
@@ -438,6 +474,13 @@ export function createRelay(port: number): http.Server {
 
   // Handle WebSocket upgrades, passing to ws.
   httpServer.on('upgrade', (req: http.IncomingMessage, socket: import('net').Socket, head: Buffer) => {
+    // Refuse banned addresses before the WebSocket handshake. A 403 makes
+    // clients back off (LocaPeer treats it as a failed connect), whereas an
+    // accepted-then-closed socket would invite an immediate reconnect.
+    if (isBanned(getClientIp(req))) {
+      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+      return;
+    }
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit('connection', ws, req);
     });
@@ -461,6 +504,7 @@ export function createRelay(port: number): http.Server {
       error('[!] ip rate error:', err);
     }
     if (!rateOk) {
+      if (strike(ip, 'connection flooding', STRIKE.connectRateLimited)) dropIp(ip);
       send(ws, ['NOTICE', 'error: connection rate limit exceeded, try again later']);
       ws.close();
       return;
@@ -498,6 +542,7 @@ export function createRelay(port: number): http.Server {
       lastRefill: Date.now(),
       violations: 0,
       alive: true,
+      floodClosed: false,
     };
     clients.add(client);
     if (clients.size > maxConnectionsSeen) {

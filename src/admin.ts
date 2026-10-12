@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { settings, SETTING_DEFS } from './settings';
-import { countEvents, getDbSizeBytes, auditLog, getAuditLog } from './db';
+import { countEvents, getDbSizeBytes, auditLog, getAuditLog, listActiveBans, countActiveBans, unbanIp } from './db';
 import { getActiveConnections, getMaxConnectionsSeen, getConnectionsPerIp, relayEvents } from './relay';
 import { isAdminConfigured, createAdminAccount, verifyAdmin } from './auth';
 import { log, error } from './log';
@@ -193,6 +193,13 @@ function getTunnelStatus(): { configured: boolean; healthy: boolean } {
   return { configured: true, healthy: true };
 }
 
+// Constant-time string comparison (hash both sides so lengths match).
+function safeEqual(a: string, b: string): boolean {
+  const ha = crypto.createHash('sha256').update(a).digest();
+  const hb = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
 function getStats(): Record<string, unknown> {
   return {
     version: getVersion(),
@@ -204,6 +211,7 @@ function getStats(): Record<string, unknown> {
     dbSizeBytes: getDbSizeBytes(),
     uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000),
     tunnel: getTunnelStatus(),
+    bansActive: countActiveBans(),
   };
 }
 
@@ -294,6 +302,10 @@ export function startAdminServer(): http.Server {
           '# TYPE relay_db_size_bytes gauge',
           `relay_db_size_bytes ${stats.dbSizeBytes}`,
           '',
+          '# HELP relay_bans_active IP addresses currently banned.',
+          '# TYPE relay_bans_active gauge',
+          `relay_bans_active ${stats.bansActive}`,
+          '',
           '# HELP relay_uptime_seconds Relay uptime in seconds.',
           '# TYPE relay_uptime_seconds gauge',
           `relay_uptime_seconds ${stats.uptimeSeconds}`,
@@ -303,6 +315,24 @@ export function startAdminServer(): http.Server {
           'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
         });
         res.end(lines.join('\n'));
+        return;
+      }
+
+      // Active bans as plain text, one IP per line, for firewall block lists
+      // (e.g. an OPNsense "URL Table (IPs)" alias). Unauthenticated like
+      // /metrics unless BANLIST_TOKEN is set, since firewalls fetching a URL
+      // table generally can't send credentials.
+      if (req.method === 'GET' && pathname === '/api/banlist.txt') {
+        const token = settings.getString('BANLIST_TOKEN');
+        const given = new URL(req.url || '/', 'http://localhost').searchParams.get('token') ?? '';
+        if (token && !safeEqual(given, token)) {
+          writeHead(res, 403, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('Forbidden\n');
+          return;
+        }
+        const ips = listActiveBans().map((b) => b.ip);
+        writeHead(res, 200, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end(ips.length ? ips.join('\n') + '\n' : '');
         return;
       }
 
@@ -393,6 +423,20 @@ export function startAdminServer(): http.Server {
           return;
         }
         sendJson(res, 200, { values: settings.snapshot() });
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/bans') {
+        sendJson(res, 200, { bans: listActiveBans() });
+        return;
+      }
+
+      if (req.method === 'DELETE' && pathname.startsWith('/api/bans/')) {
+        const target = decodeURIComponent(pathname.slice('/api/bans/'.length));
+        const removed = unbanIp(target);
+        auditLog('unban', req.socket.remoteAddress ?? 'unknown', target);
+        broadcastStats();
+        sendJson(res, removed ? 200 : 404, removed ? { ok: true } : { error: 'Not banned' });
         return;
       }
 
