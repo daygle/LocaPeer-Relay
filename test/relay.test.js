@@ -994,3 +994,103 @@ test('admin API: failed logins lock the IP out of the panel', async (t) => {
   // The relay itself is unaffected by the lockout.
   assert.equal(relay.alive(), true);
 });
+
+// ---------------------------------------------------------------------------
+// Auto-ban
+// ---------------------------------------------------------------------------
+
+// Resolves with 'open' or the HTTP status the relay refused the upgrade with.
+function upgradeOutcome(headers = {}) {
+  return new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${PORT}`, { headers });
+    ws.on('open', () => { ws.close(); resolve('open'); });
+    ws.on('unexpected-response', (_req, res) => resolve(res.statusCode));
+    ws.on('error', () => {});
+  });
+}
+
+function sendBadEvents(client, n) {
+  for (let i = 0; i < n; i++) {
+    const event = makeEvent({ content: `bad ${i}` });
+    event.content = 'tampered'; // id no longer matches
+    client.ws.send(JSON.stringify(['EVENT', event]));
+  }
+}
+
+test('auto-ban: repeated invalid events ban the IP, list it, and admin can unban', async (t) => {
+  const adminPort = nextAdminPort();
+  const relay = await startRelay({ ADMIN_PORT: String(adminPort), AUTOBAN_STRIKES: '3' });
+  t.after(() => relay.kill());
+  const bad = { 'CF-Connecting-IP': '203.0.113.50' };
+
+  const client = await connect(PORT, bad);
+  const closed = new Promise((resolve) => {
+    client.ws.on('close', () => resolve(true));
+    setTimeout(() => resolve(false), 3000);
+  });
+  sendBadEvents(client, 3);
+  assert.equal(await closed, true, 'expected the banned client to be disconnected');
+
+  assert.equal(await upgradeOutcome(bad), 403, 'expected banned IP to be refused at upgrade');
+  assert.equal(await upgradeOutcome({ 'CF-Connecting-IP': '203.0.113.51' }), 'open', 'other IPs unaffected');
+
+  const list = await (await fetch(`http://127.0.0.1:${adminPort}/api/banlist.txt`)).text();
+  assert.equal(list, '203.0.113.50\n');
+
+  await setupAdmin(adminPort);
+  const auth = { Authorization: adminAuth() };
+  const bans = await adminFetch(adminPort, '/api/bans', { headers: auth });
+  assert.equal(bans.body.bans.length, 1);
+  assert.equal(bans.body.bans[0].ip, '203.0.113.50');
+  assert.equal(bans.body.bans[0].reason, 'invalid events');
+  assert.ok(bans.body.bans[0].expiresAt > Date.now());
+
+  const del = await adminFetch(adminPort, '/api/bans/' + encodeURIComponent('203.0.113.50'), { method: 'DELETE', headers: auth });
+  assert.equal(del.res.status, 200);
+  assert.equal(await upgradeOutcome(bad), 'open', 'expected unbanned IP to connect again');
+  const after = await (await fetch(`http://127.0.0.1:${adminPort}/api/banlist.txt`)).text();
+  assert.equal(after, '');
+});
+
+test('auto-ban: never bans loopback/private addresses or when disabled', async (t) => {
+  const relay = await startRelay({ AUTOBAN_STRIKES: '2' });
+  t.after(() => relay.kill());
+
+  // No CF header: the client is loopback, which must never be banned (behind
+  // the tunnel that would be the cloudflared container, i.e. everyone).
+  const local = await connect();
+  sendBadEvents(local, 5);
+  await waitFor(() => local.messages.filter((m) => m[0] === 'OK').length >= 5);
+  assert.equal(local.ws.readyState, WebSocket.OPEN, 'loopback client must stay connected');
+  assert.equal(await upgradeOutcome(), 'open');
+  local.ws.close();
+
+  const off = await startRelay({ AUTOBAN_STRIKES: '2', AUTOBAN_ENABLED: '0' }, { port: 7903 });
+  t.after(() => off.kill());
+  const ws = await connect(7903, { 'CF-Connecting-IP': '203.0.113.60' });
+  sendBadEvents(ws, 5);
+  await waitFor(() => ws.messages.filter((m) => m[0] === 'OK').length >= 5);
+  assert.equal(ws.ws.readyState, WebSocket.OPEN, 'auto-ban disabled: client must stay connected');
+  ws.ws.close();
+});
+
+test('auto-ban: ban list honours BANLIST_TOKEN and metrics count bans', async (t) => {
+  const adminPort = nextAdminPort();
+  const relay = await startRelay({ ADMIN_PORT: String(adminPort), AUTOBAN_STRIKES: '1', BANLIST_TOKEN: 's3cret' });
+  t.after(() => relay.kill());
+
+  const client = await connect(PORT, { 'CF-Connecting-IP': '2001:db8::7' });
+  sendBadEvents(client, 1);
+  await wait(300);
+
+  const noToken = await fetch(`http://127.0.0.1:${adminPort}/api/banlist.txt`);
+  assert.equal(noToken.status, 403);
+  const wrong = await fetch(`http://127.0.0.1:${adminPort}/api/banlist.txt?token=nope`);
+  assert.equal(wrong.status, 403);
+  const ok = await fetch(`http://127.0.0.1:${adminPort}/api/banlist.txt?token=s3cret`);
+  assert.equal(ok.status, 200);
+  assert.equal(await ok.text(), '2001:db8::7\n');
+
+  const metrics = await (await fetch(`http://127.0.0.1:${adminPort}/metrics`)).text();
+  assert.match(metrics, /relay_bans_active 1/);
+});

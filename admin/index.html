@@ -153,6 +153,21 @@
   .auth-card h2 { margin: 0 0 6px; font-size: 19px; letter-spacing: -0.01em; }
   .auth-card p { color: var(--muted); font-size: 13px; margin: 0 0 20px; line-height: 1.6; }
   .auth-card .err { color: var(--danger); font-size: 13px; margin: 12px 0 0; min-height: 18px; }
+  .bans-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .bans-table th { text-align: left; color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; padding: 0 10px 8px 0; }
+  .bans-table td { padding: 9px 10px 9px 0; border-top: 1px solid var(--border); vertical-align: middle; }
+  .bans-table td.ip { font-family: var(--mono); white-space: nowrap; }
+  .bans-table td.nowrap { white-space: nowrap; }
+  @media (max-width: 560px) { .bans-table .wide { display: none; } }
+  .lead { font-size: 13px; color: var(--muted); margin: 0 0 8px; }
+  .bans-table button { padding: 5px 12px; font-size: 12px; }
+  .table-scroll { overflow-x: auto; }
+  .empty { color: var(--muted); font-size: 13px; }
+  .url-box { font-family: var(--mono); font-size: 12px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; word-break: break-all; margin: 0 0 12px; }
+  ol.steps { margin: 0; padding-left: 20px; font-size: 13px; color: var(--muted); line-height: 1.7; }
+  ol.steps b { color: var(--text); font-weight: 550; }
+  .dot-ok { color: var(--accent-2); }
+  .dot-off { color: var(--muted); }
   .hidden { display: none; }
   footer { color: var(--muted); font-size: 12px; margin-top: 26px; }
 </style>
@@ -171,6 +186,7 @@
   <div id="panel-view" class="hidden">
     <div class="nav">
       <button class="tab active" data-view="dashboard">Dashboard</button>
+      <button class="tab" data-view="bans">Bans</button>
       <button class="tab" data-view="settings">Settings</button>
     </div>
     <div id="dashboard-view">
@@ -183,6 +199,23 @@
       <section>
         <h2>Connections Over Time <span class="chip" id="history-current"></span></h2>
         <canvas id="history"></canvas>
+      </section>
+    </div>
+    <div id="bans-view" class="hidden">
+      <section>
+        <h2>Banned IPs <span class="chip" id="bans-count">0</span><span class="spacer"></span><button class="secondary" id="bans-refresh">Refresh</button></h2>
+        <div class="table-scroll" id="bans-list"><p class="empty">Loading…</p></div>
+        <span id="bans-toast" class="toast"></span>
+      </section>
+      <section>
+        <h2>Firewall Block List</h2>
+        <p class="lead">Active bans as plain text, one IP per line:</p>
+        <div class="url-box" id="banlist-url"></div>
+        <ol class="steps">
+          <li>In OPNsense, go to <b>Firewall → Aliases</b> and add an alias of type <b>URL Table (IPs)</b> with the URL above and a refresh frequency (e.g. 1 hour).</li>
+          <li>Add a <b>block</b> rule on the WAN interface with that alias as the source.</li>
+          <li>Note: clients arriving through the Cloudflare Tunnel never reach OPNsense directly, so this list only blocks traffic that hits your network without the tunnel. The relay itself refuses banned IPs either way.</li>
+        </ol>
       </section>
     </div>
     <div id="settings-view" class="hidden">
@@ -332,9 +365,9 @@ function renderStats(s) {
   $('version').textContent = 'v' + esc(s.version);
   let tunnelHtml;
   if (s.tunnel && s.tunnel.configured) {
-    tunnelHtml = '<span style="color:var(--accent-2)">&#9679;</span> Configured';
+    tunnelHtml = '<span class="dot-ok">&#9679;</span> Configured';
   } else {
-    tunnelHtml = '<span style="color:var(--muted)">&#9679;</span> Not configured';
+    tunnelHtml = '<span class="dot-off">&#9679;</span> Not configured';
   }
   $('stats').innerHTML = [
     ['Active connections', s.connections],
@@ -343,6 +376,7 @@ function renderStats(s) {
     ['Database size', fmtBytes(s.dbSizeBytes)],
     ['Uptime', fmtUptime(s.uptimeSeconds)],
     ['Tunnel', tunnelHtml],
+    ['Banned IPs', s.bansActive ?? 0],
   ].map(([k, v], i) =>
     '<div class="card"><div class="k">' + k + '</div><div class="v"' + (i === 4 ? ' id="stat-uptime"' : '') + '>' + v + '</div></div>'
   ).join('');
@@ -577,6 +611,70 @@ async function loadSettings() {
   }
 }
 
+// ------------------------------------------------------------------- bans
+function fmtRemaining(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s >= 86400) return Math.floor(s / 86400) + 'd ' + Math.floor((s % 86400) / 3600) + 'h';
+  if (s >= 3600) return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+  return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+}
+
+function bansToast(msg, ok) {
+  const el = $('bans-toast');
+  el.className = 'toast ' + (ok ? 'ok' : 'err');
+  el.textContent = msg;
+  setTimeout(() => { el.className = 'toast'; el.textContent = ''; }, 5000);
+}
+
+function renderBanlistUrl() {
+  const tokenInput = $('f-BANLIST_TOKEN');
+  const token = tokenInput ? tokenInput.value.trim() : '';
+  $('banlist-url').textContent = location.origin + '/api/banlist.txt' + (token ? '?token=' + encodeURIComponent(token) : '');
+}
+
+async function loadBans() {
+  renderBanlistUrl();
+  try {
+    const data = await api('/api/bans');
+    $('bans-count').textContent = data.bans.length;
+    if (!data.bans.length) {
+      $('bans-list').innerHTML = '<p class="empty">No IPs are banned.</p>';
+      return;
+    }
+    const now = Date.now();
+    $('bans-list').innerHTML = `
+      <table class="bans-table">
+        <thead><tr><th>IP</th><th>Reason</th><th class="wide">Strikes</th><th class="wide">Ban #</th><th>Expires</th><th></th></tr></thead>
+        <tbody>${data.bans.map((b) => `
+          <tr>
+            <td class="ip">${esc(b.ip)}</td>
+            <td>${esc(b.reason)}</td>
+            <td class="wide">${esc(b.strikes)}</td>
+            <td class="wide">${esc(b.banCount)}</td>
+            <td class="nowrap">${esc(fmtRemaining(b.expiresAt - now))}</td>
+            <td><button class="secondary" data-unban="${esc(b.ip)}">Unban</button></td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+    for (const btn of document.querySelectorAll('[data-unban]')) {
+      btn.addEventListener('click', async () => {
+        try {
+          await api('/api/bans/' + encodeURIComponent(btn.dataset.unban), { method: 'DELETE' });
+          bansToast('Unbanned ' + btn.dataset.unban + '.', true);
+        } catch (e) {
+          bansToast('Error: ' + e.message, false);
+        }
+        loadBans();
+      });
+    }
+  } catch (e) {
+    if (e instanceof AuthError) { showLogin('Session expired - log in again.'); return; }
+    $('bans-list').innerHTML = '<p class="empty">Failed to load bans: ' + esc(e.message) + '</p>';
+  }
+}
+
+$('bans-refresh').addEventListener('click', loadBans);
+
 let toastTimer = null;
 function toast(msg, ok) {
   const el = $('toast');
@@ -625,7 +723,9 @@ for (const tab of document.querySelectorAll('.tab')) {
     for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t === tab);
     $('dashboard-view').classList.toggle('hidden', tab.dataset.view !== 'dashboard');
     $('settings-view').classList.toggle('hidden', tab.dataset.view !== 'settings');
+    $('bans-view').classList.toggle('hidden', tab.dataset.view !== 'bans');
     if (tab.dataset.view === 'dashboard') drawHistory(); // redraw at visible width
+    if (tab.dataset.view === 'bans') loadBans();
   });
 }
 
@@ -637,6 +737,7 @@ function enterPanel() {
   for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.dataset.view === 'dashboard');
   $('dashboard-view').classList.remove('hidden');
   $('settings-view').classList.add('hidden');
+  $('bans-view').classList.add('hidden');
   $('version').textContent = '';
   loadSettings().catch((e) => toast(e instanceof AuthError ? 'Please log in.' : 'Failed to load settings: ' + e.message, false));
   startStatsStream();

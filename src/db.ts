@@ -67,6 +67,16 @@ db.exec(`
     detail TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
+
+  CREATE TABLE IF NOT EXISTS bans (
+    ip TEXT PRIMARY KEY,
+    reason TEXT NOT NULL,
+    strikes INTEGER NOT NULL,
+    ban_count INTEGER NOT NULL,
+    banned_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_bans_expires ON bans(expires_at);
 `);
 
 const insertEvent = db.prepare(`
@@ -409,3 +419,71 @@ export function getAuditLog(limit: number = 100): Array<{ ts: number; action: st
   return recentAudit.all(Math.min(limit, 500)) as Array<{ ts: number; action: string; ip: string | null; detail: string | null }>;
 }
 
+
+// ---------------------------------------------------------------------------
+// IP bans
+//
+// Bans live in the shared database so every relay process (and a restart)
+// honours them. Expired rows are kept for BAN_MEMORY_MS so a repeat offender
+// gets a longer ban; a manual unban deletes the row and resets that history.
+// ---------------------------------------------------------------------------
+
+const BAN_MEMORY_MS = 7 * 24 * 60 * 60_000;
+
+export interface BanRow {
+  ip: string;
+  reason: string;
+  strikes: number;
+  banCount: number;
+  bannedAt: number;
+  expiresAt: number;
+}
+
+const banGet = db.prepare('SELECT ban_count, expires_at FROM bans WHERE ip = ?');
+const banUpsert = db.prepare(`
+  INSERT INTO bans (ip, reason, strikes, ban_count, banned_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)
+  ON CONFLICT(ip) DO UPDATE SET reason = excluded.reason, strikes = excluded.strikes,
+    ban_count = excluded.ban_count, banned_at = excluded.banned_at, expires_at = excluded.expires_at
+`);
+const banActive = db.prepare('SELECT 1 FROM bans WHERE ip = ? AND expires_at > ?');
+const banListActive = db.prepare(`
+  SELECT ip, reason, strikes, ban_count AS banCount, banned_at AS bannedAt, expires_at AS expiresAt
+  FROM bans WHERE expires_at > ? ORDER BY banned_at DESC
+`);
+const banCountActive = db.prepare('SELECT COUNT(*) AS n FROM bans WHERE expires_at > ?');
+const banDelete = db.prepare('DELETE FROM bans WHERE ip = ?');
+const banPrune = db.prepare('DELETE FROM bans WHERE expires_at <= ?');
+
+// Ban (or re-ban) an IP. Each ban within BAN_MEMORY_MS of the previous one
+// doubles the duration, capped at maxMs. Returns the stored row.
+export const banIp = db.transaction(
+  (ip: string, reason: string, strikes: number, baseMs: number, maxMs: number): BanRow => {
+    const now = Date.now();
+    const prev = banGet.get(ip) as { ban_count: number; expires_at: number } | undefined;
+    const banCount = prev && prev.expires_at > now - BAN_MEMORY_MS ? prev.ban_count + 1 : 1;
+    const duration = Math.min(baseMs * 2 ** (banCount - 1), Math.max(baseMs, maxMs));
+    const expiresAt = now + duration;
+    banUpsert.run(ip, reason, strikes, banCount, now, expiresAt);
+    return { ip, reason, strikes, banCount, bannedAt: now, expiresAt };
+  }
+) as (ip: string, reason: string, strikes: number, baseMs: number, maxMs: number) => BanRow;
+
+export function isIpBanned(ip: string): boolean {
+  return banActive.get(ip, Date.now()) != null;
+}
+
+export function listActiveBans(): BanRow[] {
+  return banListActive.all(Date.now()) as BanRow[];
+}
+
+export function countActiveBans(): number {
+  return (banCountActive.get(Date.now()) as { n: number }).n;
+}
+
+export function unbanIp(ip: string): boolean {
+  return banDelete.run(ip).changes > 0;
+}
+
+export function pruneBans(): void {
+  banPrune.run(Date.now() - BAN_MEMORY_MS);
+}
