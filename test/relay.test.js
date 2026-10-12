@@ -90,9 +90,9 @@ async function startRelay(extraEnv = {}, opts = {}) {
   return relay;
 }
 
-function connect(port = PORT) {
+function connect(port = PORT, headers = {}) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`, { headers });
     const messages = [];
     ws.on('message', (buf) => messages.push(JSON.parse(buf.toString())));
     ws.on('open', () => resolve({ ws, messages }));
@@ -500,6 +500,53 @@ test('limits concurrent connections per IP', async (t) => {
   assert.equal(await closed, true, 'expected per-IP rejected connection to be closed');
   assert.equal(relay.alive(), true, 'server must survive per-IP rejections');
   first.ws.close();
+});
+
+test('per-IP cap uses CF-Connecting-IP from a local proxy', async (t) => {
+  const relay = await startRelay({ MAX_CONNECTIONS_PER_IP: '1' });
+  t.after(() => relay.kill());
+
+  // Two clients behind the same local proxy (this test connects from
+  // loopback) with different real addresses each get their own slot.
+  const a = await connect(PORT, { 'CF-Connecting-IP': '203.0.113.1' });
+  const b = await connect(PORT, { 'CF-Connecting-IP': '203.0.113.2' });
+  const welcomed = (c) => c.messages.some((m) => m[0] === 'NOTICE' && m[1].includes('welcome'));
+  assert.equal(await waitFor(() => welcomed(a) && welcomed(b)), true, 'expected both proxied clients to be accepted');
+
+  // A second connection for the same real address hits the per-IP cap.
+  const c = await connect(PORT, { 'CF-Connecting-IP': '203.0.113.1' });
+  const capped = await waitFor(() => c.messages.some((m) => m[0] === 'NOTICE' && m[1].includes('too many connections')));
+  assert.equal(capped, true, 'expected the per-IP cap to apply to the real client address');
+
+  // A malformed header falls back to the socket address.
+  const d = await connect(PORT, { 'CF-Connecting-IP': 'not-an-ip' });
+  const e = await connect(PORT, { 'CF-Connecting-IP': 'also bogus' });
+  const eCapped = await waitFor(() => e.messages.some((m) => m[0] === 'NOTICE' && m[1].includes('too many connections')));
+  assert.equal(eCapped, true, 'expected malformed headers to share the socket address');
+  for (const x of [a, b, c, d, e]) x.ws.close();
+});
+
+test('ignores CF-Connecting-IP when TRUST_CF_CONNECTING_IP is 0', async (t) => {
+  const relay = await startRelay({ MAX_CONNECTIONS_PER_IP: '1', TRUST_CF_CONNECTING_IP: '0' });
+  t.after(() => relay.kill());
+
+  const a = await connect(PORT, { 'CF-Connecting-IP': '203.0.113.1' });
+  await waitFor(() => a.messages.some((m) => m[0] === 'NOTICE' && m[1].includes('welcome')));
+  const b = await connect(PORT, { 'CF-Connecting-IP': '203.0.113.2' });
+  const capped = await waitFor(() => b.messages.some((m) => m[0] === 'NOTICE' && m[1].includes('too many connections')));
+  assert.equal(capped, true, 'expected the header to be ignored');
+  a.ws.close();
+  b.ws.close();
+});
+
+test('isPrivateAddress only trusts loopback and private ranges', () => {
+  const { isPrivateAddress } = require('../dist/clientip.js');
+  for (const ip of ['127.0.0.1', '::1', '::ffff:127.0.0.1', '10.1.2.3', '172.18.0.5', '::ffff:172.18.0.5', '192.168.1.10', 'fd00::1']) {
+    assert.equal(isPrivateAddress(ip), true, ip);
+  }
+  for (const ip of ['8.8.8.8', '172.32.0.1', '203.0.113.1', '::ffff:8.8.8.8', '2606:4700::1', 'unknown']) {
+    assert.equal(isPrivateAddress(ip), false, ip);
+  }
 });
 
 test('rate limits new connections per IP and recovers after the bucket refills', async (t) => {

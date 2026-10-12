@@ -62,6 +62,16 @@ export const SETTING_DEFS: SettingDef[] = [
     help: 'How many new connections an address may open at once before throttling starts.',
   },
   {
+    key: 'TRUST_CF_CONNECTING_IP',
+    kind: 'int',
+    default: 1,
+    min: 0,
+    max: 1,
+    group: 'Connections',
+    label: 'Trust CF-Connecting-IP (1 = on, 0 = off)',
+    help: 'Use the client address Cloudflare passes in the CF-Connecting-IP header for the per-IP limits. Only honoured when the connection comes from a loopback or private address (e.g. the cloudflared container), so internet clients cannot spoof it. Without it, all clients behind the tunnel share one address and one set of per-IP limits.',
+  },
+  {
     key: 'RATE_LIMIT_MESSAGES',
     kind: 'int',
     default: 60,
