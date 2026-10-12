@@ -32,6 +32,7 @@ All settings are environment variables:
 | `MAX_CONNECTIONS_PER_IP` | `10` | Max concurrent connections from a single IP across all relay processes sharing the database |
 | `IP_CONNECT_RATE` | `5` | Max new connections per second from a single IP (token refill rate, shared across processes) |
 | `IP_CONNECT_BURST` | `10` | Max burst of new connections from a single IP before throttling starts (shared across processes) |
+| `TRUST_CF_CONNECTING_IP` | `1` | Use the real client address from Cloudflare's `CF-Connecting-IP` header for the per-IP limits. Only honoured when the direct peer is a loopback or private address (e.g. the `cloudflared` container), so internet clients can't spoof it. Set to `0` to always use the socket address |
 | `RATE_LIMIT_MESSAGES` | `60` | Max messages per second per connection (token refill rate) |
 | `RATE_LIMIT_BURST` | `100` | Max burst of messages per connection before throttling starts |
 | `WS_PING_INTERVAL_MS` | `30000` | How often the relay sends WebSocket ping frames; clients that do not answer are disconnected. Keeps idle connections alive through intermediaries (e.g. Cloudflare) that drop silent connections |

@@ -6,6 +6,7 @@ import { randomBytes } from 'crypto';
 import { saveEvent, getEvents, eventExists, applyDeletion, isDeleted, DELETION_KIND, MAX_QUERY_LIMIT, acquireConnectionLease, renewConnectionLease, releaseConnectionLease, tryAcquireIpRate, pruneIpState, pruneOldEvents, LeaseAcquireResult } from './db';
 import { validateEvent, verifyEventId, verifySignature, serializeEvent } from './verify';
 import { isTagFilterKey } from './filter';
+import { getClientIp } from './clientip';
 import { NostrEvent, Filter, Subscription } from './types';
 import { settings } from './settings';
 import { log, error } from './log';
@@ -443,7 +444,7 @@ export function createRelay(port: number): http.Server {
   });
 
   wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
-    const ip = req.socket.remoteAddress ?? 'unknown';
+    const ip = getClientIp(req);
 
     // Fast local pre-filter before any DB work.
     if (clients.size >= settings.getInt('MAX_CONNECTIONS')) {
