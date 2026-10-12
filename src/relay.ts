@@ -3,7 +3,7 @@ import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
 import { randomBytes } from 'crypto';
-import { saveEvent, getEvents, eventExists, applyDeletion, isDeleted, DELETION_KIND, MAX_QUERY_LIMIT, acquireConnectionLease, renewConnectionLease, releaseConnectionLease, tryAcquireIpRate, pruneIpState, pruneOldEvents, LeaseAcquireResult } from './db';
+import { saveEvent, getEvents, eventExists, applyDeletion, isDeleted, DELETION_KIND, MAX_QUERY_LIMIT, acquireConnectionLease, renewConnectionLease, releaseConnectionLease, tryAcquireIpRate, pruneIpState, pruneOldEventsBatch, LeaseAcquireResult } from './db';
 import { validateEvent, verifyEventId, verifySignature, serializeEvent } from './verify';
 import { isTagFilterKey } from './filter';
 import { getClientIp } from './clientip';
@@ -31,6 +31,37 @@ const IP_STATE_IDLE_MS = 5 * 60_000;
 // How often to check for old events to prune (retention policy).
 const RETENTION_CHECK_INTERVAL_MS = 60 * 60_000; // check hourly
 let lastRetentionCheck = 0;
+// Events deleted per retention batch; the relay serves traffic between batches.
+const RETENTION_BATCH_SIZE = 500;
+let retentionRunning = false;
+
+// Delete events older than `days` in batches, yielding to the event loop
+// between them so clients and the admin panel stay responsive however large
+// the backlog is.
+function runRetention(days: number): void {
+  if (retentionRunning) return;
+  retentionRunning = true;
+  const cutoff = Math.floor(Date.now() / 1000) - days * 86400;
+  let total = 0;
+  const step = (): void => {
+    try {
+      const deleted = pruneOldEventsBatch(cutoff, RETENTION_BATCH_SIZE);
+      total += deleted;
+      if (deleted === RETENTION_BATCH_SIZE) {
+        setImmediate(step);
+        return;
+      }
+      if (total > 0) {
+        log(`[retention] pruned ${total} events older than ${days}d`);
+        relayEvents.emit('stats');
+      }
+    } catch (err) {
+      error('[!] retention prune error:', err);
+    }
+    retentionRunning = false;
+  };
+  step();
+}
 
 interface Client {
   ws: WebSocket;
@@ -397,14 +428,7 @@ export function createRelay(port: number): http.Server {
     if (now - lastRetentionCheck >= RETENTION_CHECK_INTERVAL_MS) {
       lastRetentionCheck = now;
       const days = settings.getInt('RETENTION_DAYS');
-      if (days > 0) {
-        try {
-          const deleted = pruneOldEvents(days * 86400);
-          if (deleted > 0) log(`[retention] pruned ${deleted} events older than ${days}d`);
-        } catch (err) {
-          error('[!] retention prune error:', err);
-        }
-      }
+      if (days > 0) runRetention(days);
     }
     for (const [client, token] of clientLeases) {
       if (client.ws.readyState === WebSocket.OPEN) {
