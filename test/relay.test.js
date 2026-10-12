@@ -1094,3 +1094,67 @@ test('auto-ban: ban list honours BANLIST_TOKEN and metrics count bans', async (t
   const metrics = await (await fetch(`http://127.0.0.1:${adminPort}/metrics`)).text();
   assert.match(metrics, /relay_bans_active 1/);
 });
+
+// ---------------------------------------------------------------------------
+// Retention
+// ---------------------------------------------------------------------------
+
+test('retention prunes a large backlog on an old database without blocking the relay', { timeout: 90000 }, async (t) => {
+  const Database = require('better-sqlite3');
+  fs.mkdirSync(TMP_DIR, { recursive: true });
+  const dbPath = path.join(TMP_DIR, `retention-${process.pid}-${Date.now()}.db`);
+
+  // A database as created by older versions: no idx_tags_event index, and a
+  // large backlog of events far past the retention window.
+  const pre = new Database(dbPath);
+  pre.exec(`
+    CREATE TABLE events (id TEXT PRIMARY KEY, pubkey TEXT NOT NULL, created_at INTEGER NOT NULL,
+      kind INTEGER NOT NULL, tags TEXT NOT NULL, content TEXT NOT NULL, sig TEXT NOT NULL);
+    CREATE INDEX idx_created_at ON events(created_at);
+    CREATE TABLE tags (event_id TEXT NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL,
+      FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE);
+    CREATE INDEX idx_tags ON tags(name, value);
+  `);
+  const insE = pre.prepare('INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?)');
+  const insT = pre.prepare('INSERT INTO tags VALUES (?, ?, ?)');
+  const OLD = 30000;
+  const old = Math.floor(Date.now() / 1000) - 60 * 86400;
+  pre.transaction(() => {
+    for (let i = 0; i < OLD; i++) {
+      const id = createHash('sha256').update('old' + i).digest('hex');
+      insE.run(id, 'a'.repeat(64), old, 1040, '[["p","b"]]', 'x', 'c'.repeat(128));
+      insT.run(id, 'p', 'b'.repeat(64));
+    }
+  })();
+  pre.close();
+
+  const relay = await startRelay({ RETENTION_DAYS: '30' }, { dbPath });
+  t.after(() => relay.kill());
+
+  // The first retention run starts on the first 20 s heartbeat. Keep probing
+  // the relay throughout: every REQ must be answered promptly.
+  const client = await connect();
+  let worst = 0;
+  const deadline = Date.now() + 26000;
+  for (let i = 0; Date.now() < deadline; i++) {
+    const sub = 'probe' + i;
+    const sent = Date.now();
+    client.ws.send(JSON.stringify(['REQ', sub, { kinds: [99999] }]));
+    const answered = await waitFor(() => client.messages.some((m) => m[0] === 'EOSE' && m[1] === sub), 5000);
+    assert.equal(answered, true, `relay stopped answering (probe ${i})`);
+    worst = Math.max(worst, Date.now() - sent);
+    client.ws.send(JSON.stringify(['CLOSE', sub]));
+    await wait(250);
+  }
+  assert.ok(worst < 2000, `relay blocked for ${worst} ms during retention`);
+
+  const check = new Database(dbPath, { readonly: true });
+  const left = check.prepare('SELECT COUNT(*) AS n FROM events').get().n;
+  const orphanTags = check.prepare('SELECT COUNT(*) AS n FROM tags').get().n;
+  const hasIndex = check.prepare("SELECT 1 FROM sqlite_master WHERE name = 'idx_tags_event'").get();
+  check.close();
+  assert.equal(left, 0, 'expected the whole backlog to be pruned');
+  assert.equal(orphanTags, 0, 'expected tags to be removed with their events');
+  assert.ok(hasIndex, 'expected the event_id index to be added to an existing database');
+  client.ws.close();
+});

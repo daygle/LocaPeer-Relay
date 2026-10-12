@@ -39,6 +39,9 @@ db.exec(`
     FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE
   );
   CREATE INDEX IF NOT EXISTS idx_tags ON tags(name, value);
+  -- Lets ON DELETE CASCADE find an event's tags without scanning the whole
+  -- table; without it, deleting N events costs N full scans of tags.
+  CREATE INDEX IF NOT EXISTS idx_tags_event ON tags(event_id);
 
   CREATE TABLE IF NOT EXISTS conn_leases (
     token TEXT PRIMARY KEY,
@@ -387,14 +390,15 @@ export function getDbSizeBytes(): number {
 // Event retention pruning
 // ---------------------------------------------------------------------------
 
-const deleteOldEvents = db.prepare(`
-  DELETE FROM events WHERE created_at < ?
+// Deletes at most `limit` events older than `cutoff` (unix seconds) and
+// returns how many went. Callers loop in batches, yielding between them, so
+// a large backlog never blocks the event loop in one long statement.
+const deleteOldEventsBatch = db.prepare(`
+  DELETE FROM events WHERE id IN (SELECT id FROM events WHERE created_at < ? LIMIT ?)
 `);
 
-export function pruneOldEvents(olderThanSeconds: number): number {
-  const cutoff = Math.floor(Date.now() / 1000) - olderThanSeconds;
-  const result = deleteOldEvents.run(cutoff);
-  return result.changes;
+export function pruneOldEventsBatch(cutoff: number, limit: number): number {
+  return deleteOldEventsBatch.run(cutoff, limit).changes;
 }
 
 // ---------------------------------------------------------------------------
