@@ -15,10 +15,8 @@ FROM node:26-alpine
 
 WORKDIR /app
 
-RUN apk add --no-cache python3 make g++
-
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN apk add --no-cache python3 make g++ \
+    cloudflared
 
 COPY --from=builder /app/dist ./dist
 COPY admin ./admin
