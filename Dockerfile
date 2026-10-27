@@ -15,8 +15,7 @@ FROM node:26-alpine
 
 WORKDIR /app
 
-RUN apk add --no-cache python3 make g++ \
-    cloudflared
+RUN apk add --no-cache python3 make g++
 
 COPY --from=builder /app/dist ./dist
 COPY admin ./admin
