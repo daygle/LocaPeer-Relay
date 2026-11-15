@@ -25,6 +25,19 @@ jobs:
       - name: Test
         run: npm test
 
+  lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Verify package-lock.json is in sync with package.json
+        run: npm ci --ignore-scripts
+
   docker:
     runs-on: ubuntu-latest
     steps:
