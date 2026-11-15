@@ -6,11 +6,10 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     groups:
+      production-dependencies:
+        dependency-type: "production"
       dev-dependencies:
-        patterns:
-          - "@types/*"
-          - "ts-node"
-          - "typescript"
+        dependency-type: "development"
 
   - package-ecosystem: "docker"
     directory: "/"
